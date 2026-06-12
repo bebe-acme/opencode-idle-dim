@@ -19,6 +19,9 @@ mkdir -p "${HOME}/.local/bin" "${OC_DIR}/plugin" "${OC_DIR}/themes" "${OC_DIR}/c
 install -m 0755 "${REPO_DIR}/bin/opencode-iterm-state" "${HOME}/.local/bin/opencode-iterm-state"
 install -m 0644 "${REPO_DIR}/plugin/idle-dim.js" "${OC_DIR}/plugin/idle-dim.js"
 install -m 0644 "${REPO_DIR}/themes/beib-dim.json" "${OC_DIR}/themes/beib-dim.json"
+install -m 0644 "${REPO_DIR}/themes/beib-dim-03.json" "${OC_DIR}/themes/beib-dim-03.json"
+install -m 0644 "${REPO_DIR}/themes/beib-dim-05.json" "${OC_DIR}/themes/beib-dim-05.json"
+install -m 0644 "${REPO_DIR}/themes/beib-dim-07.json" "${OC_DIR}/themes/beib-dim-07.json"
 install -m 0644 "${REPO_DIR}/command/idle.md" "${OC_DIR}/command/idle.md"
 install -m 0644 "${REPO_DIR}/command/active.md" "${OC_DIR}/command/active.md"
 

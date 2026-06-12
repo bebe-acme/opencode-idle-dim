@@ -1,3 +1,8 @@
 {
-  "plugin": ["./plugin/idle-dim.js"]
+  "plugin": [
+    ["./plugin/idle-dim.js", {
+      "titleColor": "#ff9a00",
+      "rotationMs": [8000, 12000]
+    }]
+  ]
 }
