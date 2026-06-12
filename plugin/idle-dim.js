@@ -11,6 +11,8 @@ import { createSignal } from "solid-js"
 const DIM_THEME = "beib-dim"
 const BRIGHT = "#ff9a00" // readable title color while dimmed
 const DIR = `${homedir()}/.local/state/opencode-idle`
+const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"]
+const FADE_STEP_MS = 400
 
 // Content pool for idle screen rotation
 const ACME_GREEN = "#00ff2a"
@@ -121,6 +123,25 @@ function getCurrentArt() {
   return pickFrame()
 }
 
+function runFadeSequence(api, target, log) {
+  return new Promise((resolve) => {
+    let step = 0
+    function next() {
+      if (step >= FADE_THEMES.length) {
+        api.theme.set(target)
+        log(`fade: final restore to ${target}`)
+        resolve()
+        return
+      }
+      const ok = api.theme.set(FADE_THEMES[step])
+      log(`fade: step ${step} theme=${FADE_THEMES[step]} ok=${ok}`)
+      step++
+      setTimeout(next, FADE_STEP_MS)
+    }
+    next()
+  })
+}
+
 function registerIdleRoute(api, log) {
   try {
     api.route.register([
@@ -209,15 +230,17 @@ const tui = async (api) => {
           try {
             if (savedRoute) {
               api.route.navigate(savedRoute.name, savedRoute.params)
+              savedRoute = null
             } else {
               api.route.navigate("home")
             }
           } catch (e) { log(`navigate back error: ${e?.message || e}`) }
         }
-        const ok = api.theme.set(saved)
-        log(`apply: restore ok=${ok} to=${saved}`)
+        // Wake-up fade sequence
+        const target = saved
         saved = null
-        savedRoute = null
+        setTimeout(() => runFadeSequence(api, target, log), 100)
+        log(`apply: starting fade to ${target}`)
       } else if (!idle && api.theme.selected === DIM_THEME) {
         // Instance started dimmed (flag was removed while it was down, or kv
         // kept the dim theme): heal back to system.
