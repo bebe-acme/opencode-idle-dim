@@ -12,6 +12,97 @@ const DIM_THEME = "beib-dim"
 const BRIGHT = "#ff9a00" // readable title color while dimmed
 const DIR = `${homedir()}/.local/state/opencode-idle`
 
+// Content pool for idle screen rotation
+const ACME_GREEN = "#00ff2a"
+const CONTENT_POOL = [
+  {
+    type: "ascii",
+    color: ACME_GREEN,
+    text: [
+      "      ████              ██████████              ████      ",
+      "      ████              ██████████              ████      ",
+      "      ████              ██████████              ████      ",
+      "           ████    ████████████████████    ████           ",
+      "           ████    ████████████████████    ████           ",
+      "            ██████████████████████████████████            ",
+      "                ██████████████████████████                ",
+      "                ██████████████████████████                ",
+      "            ████████      ████████      ████████          ",
+      "            ████████      ████████      ████████          ",
+      "            ████████      ████████      ████████          ",
+      "            ██████████████████████████████████            ",
+      "            ██████████████████████████████████            ",
+      "                ██████████████████████████                ",
+      "                ██████████████████████████                ",
+      "                     █████          █████                 ",
+      "                     █████          █████                 ",
+    ].join("\n"),
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    text: "beib.exe has stopped responding\n      (￣▽￣)~*  z Z z",
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    text: "💤  beib is dreaming...\n   afk but the vibes remain",
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    text: "🌙 ·  ·  ·  ✨\n  stars passing by",
+  },
+  {
+    type: "emoji",
+    color: BRIGHT,
+    text: "（◎−◎；）zZz",
+  },
+  {
+    type: "ascii",
+    color: ACME_GREEN,
+    text: "  ██    ██\n████  ████\n  ██    ██\n  ████████\n    ████",
+  },
+  {
+    type: "phrase",
+    color: "#888888",
+    text: "♪♫•*¨*•.¸¸  background music  ¸¸.•*¨*•♫♪",
+  },
+  {
+    type: "emoji",
+    color: BRIGHT,
+    text: "🐱  =^..^=  🐱\n  cat guardian mode",
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    text: "if a terminal dims and no one sees it...\n       ...does it even compile?",
+  },
+  {
+    type: "ascii",
+    color: "#00ffcc",
+    text: [
+      "    ╱▔▔╲",
+      "   ╱    ╲",
+      "  ╱  ◉◉  ╲",
+      "  ▏  ▃▃  ▕",
+      "  ▏      ▕",
+      "   ╲    ╱",
+      "    ╲▁▁╱",
+    ].join("\n"),
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    text: "loading beib.dll ... zzz\n       (press /active to resume)",
+  },
+  {
+    type: "emoji",
+    color: "#ff9a00",
+    text: "⚡ idle · beib afk",
+  },
+]
+
 // Build opentui nodes without JSX.
 function el(type, props) {
   const node = createElement(type)
