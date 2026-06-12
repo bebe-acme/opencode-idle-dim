@@ -123,13 +123,18 @@ function getCurrentArt() {
   return pickFrame()
 }
 
-function runFadeSequence(api, target, log) {
+function runFadeSequence(api, target, log, flag) {
   return new Promise((resolve) => {
     let step = 0
     function next() {
+      if (existsSync(flag)) {
+        log(`fade: aborted, flag reappeared`)
+        resolve()
+        return
+      }
       if (step >= FADE_THEMES.length) {
-        api.theme.set(target)
-        log(`fade: final restore to ${target}`)
+        const ok = api.theme.set(target)
+        log(`fade: final restore to ${target} ok=${ok}`)
         resolve()
         return
       }
@@ -138,7 +143,7 @@ function runFadeSequence(api, target, log) {
       step++
       setTimeout(next, FADE_STEP_MS)
     }
-    next()
+    setTimeout(next, FADE_STEP_MS)
   })
 }
 
@@ -239,7 +244,7 @@ const tui = async (api) => {
         // Wake-up fade sequence
         const target = saved
         saved = null
-        setTimeout(() => runFadeSequence(api, target, log), 100)
+        setTimeout(() => runFadeSequence(api, target, log, flag), 100)
         log(`apply: starting fade to ${target}`)
       } else if (!idle && api.theme.selected === DIM_THEME) {
         // Instance started dimmed (flag was removed while it was down, or kv
