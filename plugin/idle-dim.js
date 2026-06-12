@@ -130,7 +130,6 @@ function runFadeSequence(api, target, log, flag, onDone) {
       if (existsSync(flag)) {
         log(`fade: aborted, flag reappeared`)
         api.theme.set(DIM_THEME)
-        if (onDone) onDone()
         resolve()
         return
       }
@@ -202,6 +201,7 @@ const tui = async (api) => {
   if (!tty || tty === "??") return {}
   const flag = `${DIR}/${tty}.flag`
   let saved = null
+  let fading = false
   let savedRoute = null
   const [isDim, setDim] = createSignal(false)
 
@@ -245,9 +245,15 @@ const tui = async (api) => {
           } catch (e) { log(`navigate back error: ${e?.message || e}`) }
         }
         // Wake-up fade sequence
-        const target = saved
-        setTimeout(() => runFadeSequence(api, target, log, flag, () => { saved = null }), 100)
-        log(`apply: starting fade to ${target}`)
+        if (!fading) {
+          fading = true
+          const target = saved
+          setTimeout(() => {
+            runFadeSequence(api, target, log, flag, () => { saved = null })
+              .finally(() => { fading = false })
+          }, 100)
+          log(`apply: starting fade to ${target}`)
+        }
       } else if (!idle && api.theme.selected === DIM_THEME) {
         // Instance started dimmed (flag was removed while it was down, or kv
         // kept the dim theme): heal back to system.
