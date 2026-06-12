@@ -103,6 +103,54 @@ const CONTENT_POOL = [
   },
 ]
 
+let poolIndex = 0
+function pickFrame() {
+  // Prefer alien ~60% of the time, phrases ~30%, emoji ~10%
+  const roll = Math.random()
+  if (roll < 0.60) {
+    return CONTENT_POOL.find(e => e.type === "ascii" && e.color === ACME_GREEN) || CONTENT_POOL[0]
+  }
+  if (roll < 0.90) {
+    const phrases = CONTENT_POOL.filter(e => e.type === "phrase")
+    return phrases[Math.floor(Math.random() * phrases.length)] || CONTENT_POOL[1]
+  }
+  const emojis = CONTENT_POOL.filter(e => e.type === "emoji")
+  return emojis[Math.floor(Math.random() * emojis.length)] || CONTENT_POOL[4]
+}
+
+function getCurrentArt() {
+  return pickFrame()
+}
+
+async function registerIdleRoute(api, isDim, log) {
+  try {
+    api.route.register([
+      {
+        name: "idle",
+        render: () => {
+          const art = getCurrentArt()
+          const lines = art.text.split("\n")
+          return el("box", {
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            height: "100%",
+            width: "100%",
+            children: lines.map(line =>
+              el("text", { fg: art.color || BRIGHT, children: line })
+            ),
+          })
+        },
+      },
+    ])
+    log("idle route registered")
+    return true
+  } catch (e) {
+    log(`idle route failed: ${e?.message || e}`)
+    return false
+  }
+}
+
 // Build opentui nodes without JSX.
 function el(type, props) {
   const node = createElement(type)
@@ -132,6 +180,7 @@ const tui = async (api) => {
   const log = (msg) => {
     try { appendFileSync(`${DIR}/debug.log`, `${new Date().toISOString()} ${msg}\n`) } catch {}
   }
+  const idleRoute = await registerIdleRoute(api, isDim, log)
 
   const apply = () => {
     try {
@@ -147,7 +196,15 @@ const tui = async (api) => {
         saved = current && current !== DIM_THEME ? current : "system"
         const ok = api.theme.set(DIM_THEME)
         log(`apply: set dim ok=${ok} saved=${saved}`)
+        // Navigate to idle route if available
+        if (idleRoute) {
+          try { api.route.navigate("idle") } catch (e) { log(`navigate idle error: ${e?.message || e}`) }
+        }
       } else if (!idle && saved !== null) {
+        // Navigate back from idle route first
+        if (idleRoute) {
+          try { api.route.navigate("session") } catch (e) { log(`navigate session error: ${e?.message || e}`) }
+        }
         const ok = api.theme.set(saved)
         log(`apply: restore ok=${ok} to=${saved}`)
         saved = null
@@ -187,6 +244,42 @@ const tui = async (api) => {
     })
     log("slot sidebar_title registered")
   } catch (e) { log(`slot register error ${e?.message || e}`) }
+
+  // Fallback: sidebar_content shows mini idle indicator
+  try {
+    api.slots.register({
+      slots: {
+        sidebar_content(ctx, props) {
+          if (!isDim()) return null
+          const art = getCurrentArt()
+          const firstLine = art.text.split("\n")[0]
+          return el("box", {
+            flexDirection: "column",
+            paddingTop: 1,
+            children: [
+              el("text", { fg: art.color || BRIGHT, children: firstLine }),
+              el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
+              el("text", { fg: BRIGHT, children: "💤 idle · /active to wake" }),
+            ],
+          })
+        },
+      },
+    })
+    log("slot sidebar_content registered")
+  } catch (e) { log(`sidebar_content slot error ${e?.message || e}`) }
+
+  // Fallback: session_prompt_right subtle indicator
+  try {
+    api.slots.register({
+      slots: {
+        session_prompt_right(ctx, props) {
+          if (!isDim()) return null
+          return el("text", { fg: BRIGHT, children: "💤" })
+        },
+      },
+    })
+    log("slot session_prompt_right registered")
+  } catch (e) { log(`session_prompt_right slot error ${e?.message || e}`) }
 
   try { watch(DIR, () => setTimeout(apply, 50)) } catch {}
   setInterval(apply, 1500)
