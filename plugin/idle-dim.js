@@ -103,7 +103,6 @@ const CONTENT_POOL = [
   },
 ]
 
-let poolIndex = 0
 function pickFrame() {
   // Prefer alien ~60% of the time, phrases ~30%, emoji ~10%
   const roll = Math.random()
@@ -122,7 +121,7 @@ function getCurrentArt() {
   return pickFrame()
 }
 
-async function registerIdleRoute(api, isDim, log) {
+function registerIdleRoute(api, log) {
   try {
     api.route.register([
       {
@@ -174,13 +173,14 @@ const tui = async (api) => {
   if (!tty || tty === "??") return {}
   const flag = `${DIR}/${tty}.flag`
   let saved = null
+  let savedRoute = null
   const [isDim, setDim] = createSignal(false)
 
   const { appendFileSync } = await import("node:fs")
   const log = (msg) => {
     try { appendFileSync(`${DIR}/debug.log`, `${new Date().toISOString()} ${msg}\n`) } catch {}
   }
-  const idleRoute = await registerIdleRoute(api, isDim, log)
+  const idleRoute = registerIdleRoute(api, log)
 
   const apply = () => {
     try {
@@ -198,16 +198,26 @@ const tui = async (api) => {
         log(`apply: set dim ok=${ok} saved=${saved}`)
         // Navigate to idle route if available
         if (idleRoute) {
-          try { api.route.navigate("idle") } catch (e) { log(`navigate idle error: ${e?.message || e}`) }
+          try {
+            savedRoute = api.route.current
+            api.route.navigate("idle")
+          } catch (e) { log(`navigate idle error: ${e?.message || e}`) }
         }
       } else if (!idle && saved !== null) {
         // Navigate back from idle route first
         if (idleRoute) {
-          try { api.route.navigate("session") } catch (e) { log(`navigate session error: ${e?.message || e}`) }
+          try {
+            if (savedRoute) {
+              api.route.navigate(savedRoute.name, savedRoute.params)
+            } else {
+              api.route.navigate("home")
+            }
+          } catch (e) { log(`navigate back error: ${e?.message || e}`) }
         }
         const ok = api.theme.set(saved)
         log(`apply: restore ok=${ok} to=${saved}`)
         saved = null
+        savedRoute = null
       } else if (!idle && api.theme.selected === DIM_THEME) {
         // Instance started dimmed (flag was removed while it was down, or kv
         // kept the dim theme): heal back to system.
