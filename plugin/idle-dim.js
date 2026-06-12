@@ -264,6 +264,10 @@ const tui = async (api) => {
         const ok = api.theme.set("system")
         log(`apply: heal ok=${ok} (selected was ${DIM_THEME} without flag)`)
       }
+      // Ensure rotation is running whenever dimmed (covers re-idle during fade)
+      if (isDim() && !rotationTimer) {
+        startRotation()
+      }
     } catch (e) { log(`apply: error ${e?.message || e}`) }
   }
 
@@ -340,7 +344,7 @@ const tui = async (api) => {
   const startRotation = () => {
     if (rotationTimer) return
     rotationTimer = setInterval(() => {
-      if (!isDim()) return
+      if (!isDim()) { stopRotation(); return }
       setRotationToggle(value => !value)
       if (idleRoute) {
         try { api.route.navigate("idle") } catch (e) { log(`rotation navigate error: ${e?.message || e}`) }
