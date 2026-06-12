@@ -204,6 +204,7 @@ const tui = async (api) => {
   let fading = false
   let savedRoute = null
   const [isDim, setDim] = createSignal(false)
+  const [rotationToggle, setRotationToggle] = createSignal(false)
 
   const { appendFileSync } = await import("node:fs")
   const log = (msg) => {
@@ -225,6 +226,7 @@ const tui = async (api) => {
         saved = current && current !== DIM_THEME ? current : "system"
         const ok = api.theme.set(DIM_THEME)
         log(`apply: set dim ok=${ok} saved=${saved}`)
+        if (ok) startRotation()
         // Navigate to idle route if available
         if (idleRoute) {
           try {
@@ -246,6 +248,7 @@ const tui = async (api) => {
         }
         // Wake-up fade sequence
         if (!fading) {
+          stopRotation()
           fading = true
           const target = saved
           setTimeout(() => {
@@ -257,6 +260,7 @@ const tui = async (api) => {
       } else if (!idle && api.theme.selected === DIM_THEME) {
         // Instance started dimmed (flag was removed while it was down, or kv
         // kept the dim theme): heal back to system.
+        stopRotation()
         const ok = api.theme.set("system")
         log(`apply: heal ok=${ok} (selected was ${DIM_THEME} without flag)`)
       }
@@ -297,6 +301,7 @@ const tui = async (api) => {
       slots: {
         sidebar_content(ctx, props) {
           if (!isDim()) return null
+          rotationToggle()
           const art = getCurrentArt()
           const firstLine = art.text.split("\n")[0]
           return el("box", {
@@ -329,6 +334,25 @@ const tui = async (api) => {
 
   try { watch(DIR, () => setTimeout(apply, 50)) } catch {}
   setInterval(apply, 1500)
+
+  // Content rotation while idle: change content every ~10s.
+  let rotationTimer = null
+  const startRotation = () => {
+    if (rotationTimer) return
+    rotationTimer = setInterval(() => {
+      if (!isDim()) return
+      setRotationToggle(value => !value)
+      if (idleRoute) {
+        try { api.route.navigate("idle") } catch (e) { log(`rotation navigate error: ${e?.message || e}`) }
+      }
+      log("rotation: tick")
+    }, 8000 + Math.floor(Math.random() * 4000))
+  }
+
+  const stopRotation = () => {
+    if (rotationTimer) { clearInterval(rotationTimer); rotationTimer = null }
+  }
+
   apply()
   return {}
 }
