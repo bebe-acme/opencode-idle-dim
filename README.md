@@ -9,7 +9,8 @@ Built for the workflow of running many OpenCode sessions in parallel in iTerm2 t
 ## How it looks
 
 - **Active session:** your normal theme.
-- **Idle session:** every UI element dimmed uniformly (including OpenCode's generated whites/grays), session title in the sidebar rendered in `#ff9a00`, iTerm2 tab tinted light.
+- **Idle session:** every UI element dimmed uniformly (including OpenCode's generated whites/grays), session title in the sidebar rendered in `#ff9a00`, iTerm2 tab tinted light. The sidebar shows rotating idle content (the green ACME alien, phrases, emoji) plus a `💤 idle · /active to wake` hint, and a `💤` indicator sits next to the prompt. The prompt stays fully usable while dimmed.
+- **Waking up:** `/active` runs a 4-step brightness fade (~1.5s) back to your original theme.
 
 ## Architecture
 
@@ -120,7 +121,16 @@ command/idle.md            /idle command for OpenCode
 command/active.md          /active command for OpenCode
 tui.json.example           minimal TUI config registering the plugin
 install.sh                 copies everything into place and registers the plugin
+test/                      node:test suite with stubs for OpenCode's runtime imports
 ```
+
+## Tests
+
+```bash
+node --import ./test/register.mjs --test test/idle-dim.test.mjs
+```
+
+No dependencies needed: a loader hook resolves `@opentui/solid` and `solid-js` to local stubs. The suite drives the full flag lifecycle against a mocked OpenCode API and enforces the invariant that the plugin never touches `api.route` (plugin routes render without the prompt, so navigating to one locks you out of `/active`).
 
 ## License
 

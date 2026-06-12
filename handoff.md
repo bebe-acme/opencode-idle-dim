@@ -1,6 +1,6 @@
 # Handoff — opencode-idle-dim
 
-Fecha: 2026-06-12. Estado: v1 funcionando y verificado visualmente. Este repo es el espejo canónico de la tool; las copias vivas instaladas en el sistema son las que OpenCode usa.
+Fecha: 2026-06-12. Estado: v2 (idle fun mode) funcionando y verificado en una instancia real (tmux + capture-pane): dim, alien y frases rotando en el sidebar, prompt usable durante el idle, fade de despertar de 4 pasos, restore al theme original del usuario. Este repo es el espejo canónico de la tool; las copias vivas instaladas en el sistema son las que OpenCode usa.
 
 ## Qué es esto
 
@@ -35,6 +35,12 @@ Estado runtime: flags en `~/.local/state/opencode-idle/<tty>.flag`, debug en `~/
 4. **Plugins TUI se registran en `tui.json`, no en `opencode.jsonc`** (el loader de server exige `server()` y falla).
 5. iTerm2 bloquea `SetProfile` por escape code (banner de seguridad) y devuelve colores de 3 componentes (sin alpha) por AppleScript; el código legacy `dump`/`apply` ya lo maneja.
 6. La detección de TTY camina el árbol de procesos porque el shell de tools no tiene `/dev/tty`. Override: `OPENCODE_ITERM_TTY`.
+7. **NUNCA usar `api.route.register` + `api.route.navigate` para una pantalla idle fullscreen.** Las rutas de plugin renderizan sin el prompt/editor: al navegar a la ruta el usuario queda ciego y sin poder tipear `/active`, y si la rotación re-navega cada ~10s tampoco puede escapar. Esto brickeó las sesiones el 2026-06-12 (8 TTYs atrapadas). El contenido idle vive solo en slots del sidebar (`sidebar_content` es modo append, devolver children vacíos cuando no está dim es seguro; `sidebar_title` sigue siendo single_winner, nunca null).
+8. **La reactividad en slots va por getters en props** (`get fg()`, `get children()`), no por re-ejecución de la función del slot. Patrón verificado en runtime real: signal de Solid + getter; la rotación solo hace bump de un signal que el getter lee.
+
+## Tests
+
+`node --import ./test/register.mjs --test test/idle-dim.test.mjs` corre el ciclo completo contra un mock del API de OpenCode (los imports `@opentui/solid` y `solid-js` se resuelven a stubs vía loader hook, sin node_modules). Cubre: dim al aparecer el flag, contenido idle en sidebar, fade en orden (03, 05, 07, theme original), restore, y el invariante de que el plugin jamás toca `api.route`. El plugin acepta `OPENCODE_IDLE_DIR` y `OPENCODE_IDLE_TTY` por env para inyección en tests.
 
 ## Ideas / próximos pasos
 

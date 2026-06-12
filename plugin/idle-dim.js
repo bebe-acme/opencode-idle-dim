@@ -2,125 +2,84 @@
 // while a per-TTY flag file exists. /idle creates the flag, /active removes it.
 // No signals, no iTerm color changes: pure opencode theme switching, so every
 // UI element (including generated whites/grays) dims uniformly.
-import { watch, existsSync, mkdirSync } from "node:fs"
+//
+// Idle fun mode lives in sidebar slots only. The plugin must NEVER touch
+// api.route: plugin routes render without the prompt/editor, so a fullscreen
+// idle route leaves the user unable to type /active (the session looks dead).
+// See handoff.md, trap 7.
+import { watch, existsSync, mkdirSync, appendFileSync } from "node:fs"
 import { execSync } from "node:child_process"
 import { homedir } from "node:os"
 import { createElement, spread } from "@opentui/solid"
 import { createSignal } from "solid-js"
 
 const DIM_THEME = "beib-dim"
-const BRIGHT = "#ff9a00" // readable title color while dimmed
-const DIR = `${homedir()}/.local/state/opencode-idle`
+const BRIGHT = "#ff9a00" // readable accent color while dimmed
+const ACME_GREEN = "#00ff2a"
+const DIR = process.env.OPENCODE_IDLE_DIR || `${homedir()}/.local/state/opencode-idle`
 const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"]
 const FADE_STEP_MS = 400
+const ROTATION_BASE_MS = 8000
+const ROTATION_JITTER_MS = 4000
 
-// Content pool for idle screen rotation
-const ACME_GREEN = "#00ff2a"
-const CONTENT_POOL = [
+// Sidebar-safe idle frames: every line stays under ~27 columns so nothing
+// wraps in the sidebar. type drives the rotation weights in pickFrame.
+const FRAMES = [
   {
-    type: "ascii",
+    type: "alien",
     color: ACME_GREEN,
-    text: [
-      "      ████              ██████████              ████      ",
-      "      ████              ██████████              ████      ",
-      "      ████              ██████████              ████      ",
-      "           ████    ████████████████████    ████           ",
-      "           ████    ████████████████████    ████           ",
-      "            ██████████████████████████████████            ",
-      "                ██████████████████████████                ",
-      "                ██████████████████████████                ",
-      "            ████████      ████████      ████████          ",
-      "            ████████      ████████      ████████          ",
-      "            ████████      ████████      ████████          ",
-      "            ██████████████████████████████████            ",
-      "            ██████████████████████████████████            ",
-      "                ██████████████████████████                ",
-      "                ██████████████████████████                ",
-      "                     █████          █████                 ",
-      "                     █████          █████                 ",
-    ].join("\n"),
+    lines: [
+      "   ██       █████       ██",
+      "     ██  ██████████  ██",
+      "      █████████████████",
+      "        █████████████",
+      "      ████   ████   ████",
+      "      █████████████████",
+      "        █████████████",
+      "          ███     ███",
+    ],
   },
   {
-    type: "phrase",
-    color: BRIGHT,
-    text: "beib.exe has stopped responding\n      (￣▽￣)~*  z Z z",
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    text: "💤  beib is dreaming...\n   afk but the vibes remain",
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    text: "🌙 ·  ·  ·  ✨\n  stars passing by",
-  },
-  {
-    type: "emoji",
-    color: BRIGHT,
-    text: "（◎−◎；）zZz",
-  },
-  {
-    type: "ascii",
+    type: "alien",
     color: ACME_GREEN,
-    text: "  ██    ██\n████  ████\n  ██    ██\n  ████████\n    ████",
+    lines: ["  ██    ██", "████  ████", "  ██    ██", "  ████████", "    ████"],
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    lines: ["beib.exe has stopped", "responding", "(￣▽￣)~*  z Z z"],
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    lines: ["💤 beib is dreaming...", "afk but vibes remain"],
+  },
+  {
+    type: "phrase",
+    color: BRIGHT,
+    lines: ["🌙 ·  ·  ·  ✨", "stars passing by"],
   },
   {
     type: "phrase",
     color: "#888888",
-    text: "♪♫•*¨*•.¸¸  background music  ¸¸.•*¨*•♫♪",
-  },
-  {
-    type: "emoji",
-    color: BRIGHT,
-    text: "🐱  =^..^=  🐱\n  cat guardian mode",
+    lines: ["♪♫•*¨*•.¸¸", "background music", "¸¸.•*¨*•♫♪"],
   },
   {
     type: "phrase",
     color: BRIGHT,
-    text: "if a terminal dims and no one sees it...\n       ...does it even compile?",
+    lines: ["loading beib.dll ... zzz"],
   },
-  {
-    type: "ascii",
-    color: "#00ffcc",
-    text: [
-      "    ╱▔▔╲",
-      "   ╱    ╲",
-      "  ╱  ◉◉  ╲",
-      "  ▏  ▃▃  ▕",
-      "  ▏      ▕",
-      "   ╲    ╱",
-      "    ╲▁▁╱",
-    ].join("\n"),
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    text: "loading beib.dll ... zzz\n       (press /active to resume)",
-  },
-  {
-    type: "emoji",
-    color: "#ff9a00",
-    text: "⚡ idle · beib afk",
-  },
+  { type: "emoji", color: BRIGHT, lines: ["（◎−◎；）zZz"] },
+  { type: "emoji", color: BRIGHT, lines: ["🐱  =^..^=", "cat guardian mode"] },
+  { type: "emoji", color: BRIGHT, lines: ["⚡ idle · beib afk"] },
 ]
 
 function pickFrame() {
-  // Prefer alien ~60% of the time, phrases ~30%, emoji ~10%
+  // Aliens ~60% of the time, phrases ~30%, emoji ~10%.
   const roll = Math.random()
-  if (roll < 0.60) {
-    return CONTENT_POOL.find(e => e.type === "ascii" && e.color === ACME_GREEN) || CONTENT_POOL[0]
-  }
-  if (roll < 0.90) {
-    const phrases = CONTENT_POOL.filter(e => e.type === "phrase")
-    return phrases[Math.floor(Math.random() * phrases.length)] || CONTENT_POOL[1]
-  }
-  const emojis = CONTENT_POOL.filter(e => e.type === "emoji")
-  return emojis[Math.floor(Math.random() * emojis.length)] || CONTENT_POOL[4]
-}
-
-function getCurrentArt() {
-  return pickFrame()
+  const type = roll < 0.6 ? "alien" : roll < 0.9 ? "phrase" : "emoji"
+  const pool = FRAMES.filter((frame) => frame.type === type)
+  return pool[Math.floor(Math.random() * pool.length)] || FRAMES[0]
 }
 
 function runFadeSequence(api, target, log, flag, onDone) {
@@ -128,7 +87,7 @@ function runFadeSequence(api, target, log, flag, onDone) {
     let step = 0
     function next() {
       if (existsSync(flag)) {
-        log(`fade: aborted, flag reappeared`)
+        log("fade: aborted, flag reappeared")
         api.theme.set(DIM_THEME)
         resolve()
         return
@@ -149,35 +108,6 @@ function runFadeSequence(api, target, log, flag, onDone) {
   })
 }
 
-function registerIdleRoute(api, log) {
-  try {
-    api.route.register([
-      {
-        name: "idle",
-        render: () => {
-          const art = getCurrentArt()
-          const lines = art.text.split("\n")
-          return el("box", {
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            height: "100%",
-            width: "100%",
-            children: lines.map(line =>
-              el("text", { fg: art.color || BRIGHT, children: line })
-            ),
-          })
-        },
-      },
-    ])
-    log("idle route registered")
-    return true
-  } catch (e) {
-    log(`idle route failed: ${e?.message || e}`)
-    return false
-  }
-}
-
 // Build opentui nodes without JSX.
 function el(type, props) {
   const node = createElement(type)
@@ -186,40 +116,68 @@ function el(type, props) {
 }
 
 const tui = async (api) => {
-  try { mkdirSync(DIR, { recursive: true }) } catch {}
-
-  let tty = ""
   try {
-    tty = execSync(`ps -o tty= -p ${process.pid}`, { encoding: "utf8" }).trim()
+    mkdirSync(DIR, { recursive: true })
   } catch {}
 
-  try {
-    const { appendFileSync } = await import("node:fs")
-    appendFileSync(`${DIR}/debug.log`, `${new Date().toISOString()} tui() pid=${process.pid} tty=${tty || "none"} themeReady=${api?.theme?.ready}\n`)
-  } catch {}
+  let tty = process.env.OPENCODE_IDLE_TTY || ""
+  if (!tty) {
+    try {
+      tty = execSync(`ps -o tty= -p ${process.pid}`, { encoding: "utf8" }).trim()
+    } catch {}
+  }
+
+  const log = (msg) => {
+    try {
+      appendFileSync(`${DIR}/debug.log`, `${new Date().toISOString()} ${msg}\n`)
+    } catch {}
+  }
+  log(`tui() pid=${process.pid} tty=${tty || "none"} themeReady=${api?.theme?.ready}`)
 
   if (!tty || tty === "??") return {}
   const flag = `${DIR}/${tty}.flag`
   let saved = null
   let fading = false
-  let savedRoute = null
+  let rotationTimer = null
   const [isDim, setDim] = createSignal(false)
-  const [rotationToggle, setRotationToggle] = createSignal(false)
+  const [frameTick, bumpFrameTick] = createSignal(0)
 
-  const { appendFileSync } = await import("node:fs")
-  const log = (msg) => {
-    try { appendFileSync(`${DIR}/debug.log`, `${new Date().toISOString()} ${msg}\n`) } catch {}
+  const startRotation = () => {
+    if (rotationTimer) return
+    rotationTimer = setInterval(
+      () => {
+        if (!isDim()) {
+          stopRotation()
+          return
+        }
+        bumpFrameTick((value) => value + 1)
+      },
+      ROTATION_BASE_MS + Math.floor(Math.random() * ROTATION_JITTER_MS),
+    )
+    rotationTimer.unref?.()
   }
-  const idleRoute = registerIdleRoute(api, log)
+
+  const stopRotation = () => {
+    if (rotationTimer) {
+      clearInterval(rotationTimer)
+      rotationTimer = null
+    }
+  }
 
   const apply = () => {
     try {
       const idle = existsSync(flag)
       setDim(idle)
-      if (!api.theme.ready) { log("apply: theme not ready"); return }
+      if (!api.theme.ready) {
+        log("apply: theme not ready")
+        return
+      }
       if (idle && saved === null) {
         const has = api.theme.has(DIM_THEME)
-        if (!has) { log(`apply: theme ${DIM_THEME} not found; selected=${api.theme.selected}`); return }
+        if (!has) {
+          log(`apply: theme ${DIM_THEME} not found; selected=${api.theme.selected}`)
+          return
+        }
         // Never record the dim theme itself as the previous theme (covers
         // restarts that happen while the flag exists and kv persisted the dim).
         const current = api.theme.selected
@@ -227,33 +185,18 @@ const tui = async (api) => {
         const ok = api.theme.set(DIM_THEME)
         log(`apply: set dim ok=${ok} saved=${saved}`)
         if (ok) startRotation()
-        // Navigate to idle route if available
-        if (idleRoute) {
-          try {
-            savedRoute = api.route.current
-            api.route.navigate("idle")
-          } catch (e) { log(`navigate idle error: ${e?.message || e}`) }
-        }
       } else if (!idle && saved !== null) {
-        // Navigate back from idle route first
-        if (idleRoute) {
-          try {
-            if (savedRoute) {
-              api.route.navigate(savedRoute.name, savedRoute.params)
-              savedRoute = null
-            } else {
-              api.route.navigate("home")
-            }
-          } catch (e) { log(`navigate back error: ${e?.message || e}`) }
-        }
-        // Wake-up fade sequence
+        // Wake-up fade sequence.
         if (!fading) {
           stopRotation()
           fading = true
           const target = saved
           setTimeout(() => {
-            runFadeSequence(api, target, log, flag, () => { saved = null })
-              .finally(() => { fading = false })
+            runFadeSequence(api, target, log, flag, () => {
+              saved = null
+            }).finally(() => {
+              fading = false
+            })
           }, 100)
           log(`apply: starting fade to ${target}`)
         }
@@ -264,11 +207,13 @@ const tui = async (api) => {
         const ok = api.theme.set("system")
         log(`apply: heal ok=${ok} (selected was ${DIM_THEME} without flag)`)
       }
-      // Ensure rotation is running whenever dimmed (covers re-idle during fade)
+      // Ensure rotation is running whenever dimmed (covers re-idle during fade).
       if (isDim() && !rotationTimer) {
         startRotation()
       }
-    } catch (e) { log(`apply: error ${e?.message || e}`) }
+    } catch (e) {
+      log(`apply: error ${e?.message || e}`)
+    }
   }
 
   // Keep the sidebar session title readable while dimmed: win the
@@ -280,14 +225,18 @@ const tui = async (api) => {
         sidebar_title(ctx, props) {
           const children = [
             el("text", {
-              get fg() { return isDim() ? BRIGHT : ctx.theme.current.text },
+              get fg() {
+                return isDim() ? BRIGHT : ctx.theme.current.text
+              },
               children: props.title,
             }),
           ]
           if (props.share_url) {
             children.push(
               el("text", {
-                get fg() { return ctx.theme.current.textMuted },
+                get fg() {
+                  return ctx.theme.current.textMuted
+                },
                 children: props.share_url,
               }),
             )
@@ -297,65 +246,65 @@ const tui = async (api) => {
       },
     })
     log("slot sidebar_title registered")
-  } catch (e) { log(`slot register error ${e?.message || e}`) }
+  } catch (e) {
+    log(`slot register error ${e?.message || e}`)
+  }
 
-  // Fallback: sidebar_content shows mini idle indicator
+  // Idle fun content: rotating frames in the sidebar (append slot). The box is
+  // always returned; only its children react to isDim/frameTick, mirroring the
+  // proven getter pattern from sidebar_title.
   try {
     api.slots.register({
       slots: {
-        sidebar_content(ctx, props) {
-          if (!isDim()) return null
-          rotationToggle()
-          const art = getCurrentArt()
-          const firstLine = art.text.split("\n")[0]
+        sidebar_content(ctx) {
           return el("box", {
             flexDirection: "column",
-            paddingTop: 1,
-            children: [
-              el("text", { fg: art.color || BRIGHT, children: firstLine }),
-              el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
-              el("text", { fg: BRIGHT, children: "💤 idle · /active to wake" }),
-            ],
+            get children() {
+              if (!isDim()) return []
+              frameTick()
+              const frame = pickFrame()
+              return [
+                el("box", { height: 1 }),
+                ...frame.lines.map((line) => el("text", { fg: frame.color, children: line })),
+                el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
+                el("text", { fg: BRIGHT, children: "💤 idle · /active to wake" }),
+              ]
+            },
           })
         },
       },
     })
     log("slot sidebar_content registered")
-  } catch (e) { log(`sidebar_content slot error ${e?.message || e}`) }
+  } catch (e) {
+    log(`sidebar_content slot error ${e?.message || e}`)
+  }
 
-  // Fallback: session_prompt_right subtle indicator
+  // Subtle indicator next to the prompt, visible even when the sidebar is
+  // hidden. Empty string while active so nothing renders.
   try {
     api.slots.register({
       slots: {
-        session_prompt_right(ctx, props) {
-          if (!isDim()) return null
-          return el("text", { fg: BRIGHT, children: "💤" })
+        session_prompt_right() {
+          return el("text", {
+            fg: BRIGHT,
+            get children() {
+              return isDim() ? "💤" : ""
+            },
+          })
         },
       },
     })
     log("slot session_prompt_right registered")
-  } catch (e) { log(`session_prompt_right slot error ${e?.message || e}`) }
-
-  try { watch(DIR, () => setTimeout(apply, 50)) } catch {}
-  setInterval(apply, 1500)
-
-  // Content rotation while idle: change content every ~10s.
-  let rotationTimer = null
-  const startRotation = () => {
-    if (rotationTimer) return
-    rotationTimer = setInterval(() => {
-      if (!isDim()) { stopRotation(); return }
-      setRotationToggle(value => !value)
-      if (idleRoute) {
-        try { api.route.navigate("idle") } catch (e) { log(`rotation navigate error: ${e?.message || e}`) }
-      }
-      log("rotation: tick")
-    }, 8000 + Math.floor(Math.random() * 4000))
+  } catch (e) {
+    log(`session_prompt_right slot error ${e?.message || e}`)
   }
 
-  const stopRotation = () => {
-    if (rotationTimer) { clearInterval(rotationTimer); rotationTimer = null }
-  }
+  try {
+    const watcher = watch(DIR, () => setTimeout(apply, 50))
+    watcher.unref?.()
+  } catch {}
+  const poll = setInterval(apply, 1500)
+  poll.unref?.()
 
   apply()
   return {}
