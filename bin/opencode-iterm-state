@@ -1,0 +1,409 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mark or restore the iTerm2 session that launched the current opencode process.
+# This intentionally targets by TTY, not by the frontmost iTerm2 window, because
+# opencode's tool shell has no /dev/tty and frontmost targeting is unsafe.
+#
+# "idle" emulates iTerm2's native dimming (Appearance > Dimming): every session
+# color (background, foreground, the 16 ANSI colors, bold, cursor, selection)
+# is blended toward neutral mid gray by DIM_AMOUNT, exactly like the built-in
+# "Dim inactive split panes" look. "active" restores the captured originals.
+
+ACTION="${1:-}"
+STATE_DIR="${HOME}/.local/state/opencode-iterm-state"
+mkdir -p "$STATE_DIR"
+
+# 0.40 matches iTerm2's default Dimming amount slider.
+DIM_AMOUNT="${OPENCODE_ITERM_DIM_AMOUNT:-0.85}"
+
+usage() {
+  printf '%s\n' "usage: opencode-iterm-state idle|active|locate|list|dump|apply|pid" >&2
+  exit 2
+}
+
+[[ -n "$ACTION" ]] || usage
+
+find_opencode_tty() {
+  # Walk up the process tree and return the first real TTY. In opencode tool
+  # execution, children usually have tty=?? while the opencode ancestor has the
+  # iTerm2 TTY. This avoids frontmost-window targeting entirely.
+  local pid="$$"
+
+  while [[ -n "$pid" && "$pid" != "1" ]]; do
+    local proc_tty parent_pid
+    proc_tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+
+    if [[ -n "$proc_tty" && "$proc_tty" != "??" ]]; then
+      printf '%s\n' "/dev/$proc_tty"
+      return 0
+    fi
+
+    parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ -n "$parent_pid" && "$parent_pid" != "$pid" ]] || break
+    pid="$parent_pid"
+  done
+
+  return 1
+}
+
+if [[ "${OPENCODE_ITERM_TTY:-}" == /dev/tty* ]]; then
+  TARGET_TTY="$OPENCODE_ITERM_TTY"
+else
+  TARGET_TTY="$(find_opencode_tty)"
+fi
+[[ -n "$TARGET_TTY" ]] || { printf '%s\n' "ERROR: could not detect opencode parent TTY" >&2; exit 1; }
+
+TTY_KEY="${TARGET_TTY#/dev/}"
+STATE_FILE="$STATE_DIR/${TTY_KEY}.state"
+
+find_opencode_pid() {
+  # Return the main opencode TUI PID attached to this TTY. Do not use pkill:
+  # SIGUSR2 is only safe for opencode processes that install the TUI/theme
+  # reload handler.
+  ps -t "$TTY_KEY" -o pid=,comm= 2>/dev/null \
+    | awk '$2 ~ /(^|\/)opencode$/ { print $1; exit }'
+}
+
+refresh_opencode_theme() {
+  # opencode v1.16+ handles SIGUSR2 by clearing terminal palette cache,
+  # regenerating the system theme, and re-rendering after short delayed passes.
+  local pid
+  pid="$(find_opencode_pid || true)"
+  if [[ -z "$pid" ]]; then
+    printf 'ERROR: no opencode TUI PID found for %s; refusing to claim full dim\n' "$TARGET_TTY" >&2
+    return 1
+  fi
+
+  # Fire the signal detached AFTER this script (and the opencode tool call that
+  # ran it) has exited: SIGUSR2 makes opencode reload config and abort any
+  # in-flight tool execution, which showed up as fake "tool interrupted".
+  ( sleep 1.5; kill -USR2 "$pid" ) >/dev/null 2>&1 &
+  disown || true
+  printf '%s\n' "$pid"
+}
+
+send_idle_escape_codes() {
+  {
+    # Subtle light tab color so the tab itself hints idle. No badge.
+    printf '\033]6;1;bg;red;brightness;245\a'
+    printf '\033]6;1;bg;green;brightness;245\a'
+    printf '\033]6;1;bg;blue;brightness;245\a'
+    printf '\033]1337;SetBadgeFormat=\a'
+  } > "$TARGET_TTY" 2>/dev/null || true
+}
+
+send_active_escape_codes() {
+  {
+    printf '\033]6;1;bg;*;default\a'
+    printf '\033]1337;SetBadgeFormat=\a'
+  } > "$TARGET_TTY" 2>/dev/null || true
+}
+
+# Color properties handled, in state-file order (one line per color, "r,g,b,a").
+# Line 1 of the state file is the session name, line 2 the transparency, then
+# these colors follow in order.
+COLOR_PROPS_OSA='{"background color", "foreground color", "bold color", "cursor color", "cursor text color", "selection color", "selected text color", "ANSI black color", "ANSI red color", "ANSI green color", "ANSI yellow color", "ANSI blue color", "ANSI magenta color", "ANSI cyan color", "ANSI white color", "ANSI bright black color", "ANSI bright red color", "ANSI bright green color", "ANSI bright yellow color", "ANSI bright blue color", "ANSI bright magenta color", "ANSI bright cyan color", "ANSI bright white color"}'
+
+list_sessions() {
+  osascript <<'OSA' 2>&1
+tell application "iTerm2"
+  set out to ""
+  set wi to 0
+  repeat with aWindow in windows
+    set wi to wi + 1
+    set ti to 0
+    repeat with aTab in tabs of aWindow
+      set ti to ti + 1
+      set si to 0
+      repeat with aSession in sessions of aTab
+        set si to si + 1
+        set n to name of aSession
+        set ttyName to ""
+        try
+          set ttyName to tty of aSession
+        end try
+        set out to out & "window=" & wi & " tab=" & ti & " session=" & si & " name=" & n & " tty=" & ttyName & linefeed
+      end repeat
+    end repeat
+  end repeat
+  return out
+end tell
+OSA
+}
+
+locate_session() {
+  osascript - "$TARGET_TTY" <<'OSA' 2>&1
+on run argv
+  set targetTty to item 1 of argv
+  tell application "iTerm2"
+    set wi to 0
+    repeat with aWindow in windows
+      set wi to wi + 1
+      set ti to 0
+      repeat with aTab in tabs of aWindow
+        set ti to ti + 1
+        set si to 0
+        repeat with aSession in sessions of aTab
+          set si to si + 1
+          try
+            if (tty of aSession) is targetTty then
+              return "FOUND window=" & wi & " tab=" & ti & " session=" & si & " name=" & (name of aSession) & " tty=" & targetTty
+            end if
+          end try
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm2 session found for " & targetTty
+end run
+OSA
+}
+
+capture_state() {
+  osascript - "$TARGET_TTY" <<OSA
+on joinColor(c)
+  set alphaVal to 0
+  if (count of c) is greater than 3 then set alphaVal to item 4 of c
+  return ((item 1 of c) as text) & "," & ((item 2 of c) as text) & "," & ((item 3 of c) as text) & "," & (alphaVal as text)
+end joinColor
+
+on run argv
+  set targetTty to item 1 of argv
+  set colorProps to $COLOR_PROPS_OSA
+  tell application "iTerm2"
+    repeat with aWindow in windows
+      repeat with aTab in tabs of aWindow
+        repeat with aSession in sessions of aTab
+          set isTarget to false
+          try
+            if (tty of aSession) is targetTty then set isTarget to true
+          end try
+          if isTarget then
+            set n to name of aSession
+            set tr to 0
+            try
+              set tr to transparency of aSession
+            end try
+            set out to n & linefeed & tr
+            repeat with propName in colorProps
+              set colorText to "SKIP"
+              try
+                set c to my readColor(aSession, propName as text)
+                set colorText to my joinColor(c)
+              end try
+              set out to out & linefeed & colorText
+            end repeat
+            return out
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm2 session found for " & targetTty
+end run
+
+on readColor(aSession, propName)
+  tell application "iTerm2"
+    if propName is "background color" then return background color of aSession
+    if propName is "foreground color" then return foreground color of aSession
+    if propName is "bold color" then return bold color of aSession
+    if propName is "cursor color" then return cursor color of aSession
+    if propName is "cursor text color" then return cursor text color of aSession
+    if propName is "selection color" then return selection color of aSession
+    if propName is "selected text color" then return selected text color of aSession
+    if propName is "ANSI black color" then return ANSI black color of aSession
+    if propName is "ANSI red color" then return ANSI red color of aSession
+    if propName is "ANSI green color" then return ANSI green color of aSession
+    if propName is "ANSI yellow color" then return ANSI yellow color of aSession
+    if propName is "ANSI blue color" then return ANSI blue color of aSession
+    if propName is "ANSI magenta color" then return ANSI magenta color of aSession
+    if propName is "ANSI cyan color" then return ANSI cyan color of aSession
+    if propName is "ANSI white color" then return ANSI white color of aSession
+    if propName is "ANSI bright black color" then return ANSI bright black color of aSession
+    if propName is "ANSI bright red color" then return ANSI bright red color of aSession
+    if propName is "ANSI bright green color" then return ANSI bright green color of aSession
+    if propName is "ANSI bright yellow color" then return ANSI bright yellow color of aSession
+    if propName is "ANSI bright blue color" then return ANSI bright blue color of aSession
+    if propName is "ANSI bright magenta color" then return ANSI bright magenta color of aSession
+    if propName is "ANSI bright cyan color" then return ANSI bright cyan color of aSession
+    if propName is "ANSI bright white color" then return ANSI bright white color of aSession
+  end tell
+  error "unknown property " & propName
+end readColor
+OSA
+}
+
+apply_colors_from_lines() {
+  # Reads color lines (state-file order, starting at the background color) on
+  # stdin and applies them to the target session. Lines equal to SKIP are
+  # ignored. Used by restore_active.
+  osascript - "$TARGET_TTY" "$(cat)" <<OSA
+on colorList(s)
+  set oldDelims to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to ","
+  set parts to text items of s
+  set AppleScript's text item delimiters to oldDelims
+  if (count of parts) is less than 4 then return missing value
+  return {(item 1 of parts) as integer, (item 2 of parts) as integer, (item 3 of parts) as integer, (item 4 of parts) as integer}
+end colorList
+
+on run argv
+  set targetTty to item 1 of argv
+  set blob to item 2 of argv
+  set oldDelims to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to linefeed
+  set colorLines to text items of blob
+  set AppleScript's text item delimiters to oldDelims
+  set colorProps to $COLOR_PROPS_OSA
+  tell application "iTerm2"
+    repeat with aWindow in windows
+      repeat with aTab in tabs of aWindow
+        repeat with aSession in sessions of aTab
+          set isTarget to false
+          try
+            if (tty of aSession) is targetTty then set isTarget to true
+          end try
+          if isTarget then
+            set i to 0
+            repeat with propName in colorProps
+              set i to i + 1
+              if i is greater than (count of colorLines) then exit repeat
+              set lineText to item i of colorLines
+              if lineText is not "SKIP" then
+                set c to my colorList(lineText)
+                if c is not missing value then
+                  try
+                    my writeColor(aSession, propName as text, c)
+                  end try
+                end if
+              end if
+            end repeat
+            return "COLORS_APPLIED tty=" & targetTty & " name=" & (name of aSession)
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "No iTerm2 session found for " & targetTty
+end run
+
+on writeColor(aSession, propName, c)
+  tell application "iTerm2"
+    if propName is "background color" then
+      set background color of aSession to c
+    else if propName is "foreground color" then
+      set foreground color of aSession to c
+    else if propName is "bold color" then
+      set bold color of aSession to c
+    else if propName is "cursor color" then
+      set cursor color of aSession to c
+    else if propName is "cursor text color" then
+      set cursor text color of aSession to c
+    else if propName is "selection color" then
+      set selection color of aSession to c
+    else if propName is "selected text color" then
+      set selected text color of aSession to c
+    else if propName is "ANSI black color" then
+      set ANSI black color of aSession to c
+    else if propName is "ANSI red color" then
+      set ANSI red color of aSession to c
+    else if propName is "ANSI green color" then
+      set ANSI green color of aSession to c
+    else if propName is "ANSI yellow color" then
+      set ANSI yellow color of aSession to c
+    else if propName is "ANSI blue color" then
+      set ANSI blue color of aSession to c
+    else if propName is "ANSI magenta color" then
+      set ANSI magenta color of aSession to c
+    else if propName is "ANSI cyan color" then
+      set ANSI cyan color of aSession to c
+    else if propName is "ANSI white color" then
+      set ANSI white color of aSession to c
+    else if propName is "ANSI bright black color" then
+      set ANSI bright black color of aSession to c
+    else if propName is "ANSI bright red color" then
+      set ANSI bright red color of aSession to c
+    else if propName is "ANSI bright green color" then
+      set ANSI bright green color of aSession to c
+    else if propName is "ANSI bright yellow color" then
+      set ANSI bright yellow color of aSession to c
+    else if propName is "ANSI bright blue color" then
+      set ANSI bright blue color of aSession to c
+    else if propName is "ANSI bright magenta color" then
+      set ANSI bright magenta color of aSession to c
+    else if propName is "ANSI bright cyan color" then
+      set ANSI bright cyan color of aSession to c
+    else if propName is "ANSI bright white color" then
+      set ANSI bright white color of aSession to c
+    end if
+  end tell
+end writeColor
+OSA
+}
+
+dim_color_line() {
+  # Blend "r,g,b,a" toward DIM_TARGET by DIM_AMOUNT: c' = c*(1-k) + target*k
+  # Default target is black (0): the session fades out instead of graying out.
+  local line="$1"
+  awk -F, -v k="$DIM_AMOUNT" -v t="${OPENCODE_ITERM_DIM_TARGET:-0}" '
+    {
+      r = int(($1 * (1 - k)) + (t * k) + 0.5)
+      g = int(($2 * (1 - k)) + (t * k) + 0.5)
+      b = int(($3 * (1 - k)) + (t * k) + 0.5)
+      a = ($4 == "" ? 0 : $4)
+      print r "," g "," b "," a
+    }
+  ' <<< "$line"
+}
+
+FLAG_DIR="${HOME}/.local/state/opencode-idle"
+FLAG_FILE="$FLAG_DIR/${TTY_KEY}.flag"
+
+mark_idle() {
+  # Persistent per-session dimming, independent of focus, implemented at the
+  # opencode level: the idle-dim TUI plugin in this instance watches a per-TTY
+  # flag file and switches the whole TUI to the "beib-dim" theme (every role
+  # dimmed ~85%, whites included). No iTerm color changes, no signals.
+  mkdir -p "$FLAG_DIR"
+
+  # Legacy cleanup: if an old palette-dim state file exists, restore the
+  # original session colors first so we never stack dim mechanisms.
+  if [[ -f "$STATE_FILE" ]]; then
+    tail -n +3 "$STATE_FILE" | apply_colors_from_lines > /dev/null || true
+    rm -f "$STATE_FILE"
+  fi
+
+  if [[ -f "$FLAG_FILE" ]]; then
+    send_idle_escape_codes
+    printf 'IDLE_ALREADY tty=%s flag=%s\n' "$TARGET_TTY" "$FLAG_FILE"
+    return 0
+  fi
+
+  : > "$FLAG_FILE"
+  send_idle_escape_codes
+  printf 'IDLE_SET tty=%s (plugin switches theme to beib-dim within ~2s; /active restores)\n' "$TARGET_TTY"
+}
+
+restore_active() {
+  rm -f "$FLAG_FILE"
+
+  # Legacy: restore original session colors if an old palette-dim state exists.
+  if [[ -f "$STATE_FILE" ]]; then
+    tail -n +3 "$STATE_FILE" | apply_colors_from_lines > /dev/null || true
+    rm -f "$STATE_FILE"
+  fi
+  send_active_escape_codes
+  printf 'ACTIVE_RESTORED tty=%s (plugin restores previous theme within ~2s)\n' "$TARGET_TTY"
+}
+
+case "$ACTION" in
+  idle) mark_idle ;;
+  active) restore_active ;;
+  locate) locate_session ;;
+  list) list_sessions ;;
+  dump) capture_state ;;
+  apply) apply_colors_from_lines ;;
+  pid) find_opencode_pid ;;
+  *) usage ;;
+esac
