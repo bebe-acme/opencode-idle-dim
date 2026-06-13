@@ -1,0 +1,8 @@
+# Playwright MCP session artifacts
+.playwright-mcp/
+
+# macOS
+.DS_Store
+
+# Editor / local
+*.log

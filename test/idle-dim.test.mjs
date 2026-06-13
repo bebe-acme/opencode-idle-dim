@@ -96,7 +96,14 @@ test("idle-dim lifecycle: dim, sidebar content, fade restore, no routes", async 
 
   // Flag appears: theme dims within the 1.5s poll window.
   writeFileSync(FLAG_FILE, "")
-  await waitFor(() => api.themeCalls.includes("beib-dim"), 4000, "dim theme set after flag creation")
+  await waitFor(() => api.themeCalls.includes("beib-dim"), 5000, "dim theme set after flag creation")
+
+  // Entering idle fades IN (bright -> dark) before reaching the dim theme.
+  assert.deepEqual(
+    api.themeCalls.slice(0, 4),
+    ["beib-dim-07", "beib-dim-05", "beib-dim-03", "beib-dim"],
+    "enter fade steps through intermediate themes in order",
+  )
 
   // Idle state: sidebar shows rotating content, prompt shows indicator.
   const idleChildren = childrenOf(api.slotDefs.sidebar_content(slotContext, {}))

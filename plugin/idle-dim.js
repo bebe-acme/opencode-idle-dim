@@ -12,7 +12,7 @@
 // top of every saver so a parked session is always identifiable. One color is
 // used everywhere, captured from the active theme accent before dimming. Sprites
 // use half-block characters (▀▄█) so pixels are square instead of stretched.
-// Dismiss: any key (useKeyboard), ⌘K → Wake Up, or /active.
+// Dismiss: any key (renderer keyInput), ⌘K → Wake Up, or /active.
 import * as otui from "@opentui/solid"
 import { watch, existsSync, mkdirSync, appendFileSync } from "node:fs"
 import { execSync } from "node:child_process"
@@ -23,9 +23,9 @@ const { createElement, spread } = otui
 
 const DIM_THEME = "beib-dim"
 const BRIGHT = "#ff9a00" // fallback accent when the theme accent can't be read
-const ACME_GREEN = "#00ff2a"
 const DIR = process.env.OPENCODE_IDLE_DIR || `${homedir()}/.local/state/opencode-idle`
-const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"]
+const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"] // wake: dark -> bright
+const FADE_IN_THEMES = ["beib-dim-07", "beib-dim-05", "beib-dim-03"] // enter: bright -> dark
 const FADE_STEP_MS = 400
 
 // Convert a pixel grid (strings; any non-space/non-dot char = filled) into
@@ -48,34 +48,38 @@ function toHalfBlocks(rows) {
   return out
 }
 
-// Classic space invader (square pixels via half-blocks).
-const ALIEN = toHalfBlocks([
-  "....#...#....",
-  "....#...#....",
-  "...#######...",
-  "..#########..",
-  "..##.###.##..",
-  "..#########..",
-  ".###########.",
-  "##.#######.##",
-  "##.#######.##",
-  "...#.....#...",
-  "..##.....##..",
-  "..##.....##..",
-])
-const ALIEN_W = 13
-const ALIEN_H = ALIEN.length // 6
+// Scale a pixel grid by integer factors (crisp, no interpolation). Used to
+// enlarge a sprite without breaking its aspect ratio.
+function scalePixels(rows, sx, sy) {
+  const out = []
+  for (const r of rows) {
+    let line = ""
+    for (const ch of r) line += ch.repeat(sx)
+    for (let k = 0; k < sy; k++) out.push(line)
+  }
+  return out
+}
 
-// Compact alien for the sidebar fallback (shown if the overlay can't paint).
-const MINI_ALIEN = toHalfBlocks([
-  "..#.....#..",
-  "...#...#...",
-  "..#######..",
-  ".##.###.##.",
-  "###########",
-  "#.#####.#.#",
-  "...#...#...",
-])
+// ACME alien logo, rasterized directly from the source SVG (viewBox
+// 362.78x259.62 on a 30.71-unit grid -> 10 cols x 7 rows of pixels). Each "#"
+// is one logo cell. Half-blocks keep pixels square; scalePixels(…,2,2) enlarges
+// it to 20x14 px (20 cols x 7 char-rows) while preserving the exact 10:7 aspect
+// ratio, so it never looks stretched.
+const ACME_PIXELS = [
+  "#...##...#", // antenna tips (corners) + head top
+  ".#.####.#.", // antennae stepping in + head
+  "..######..", // body
+  ".##.##.##.", // body with two square eyes
+  ".########.", // widest body
+  "..######..", // body
+  "...#..#...", // two legs
+]
+const ALIEN = toHalfBlocks(scalePixels(ACME_PIXELS, 2, 2))
+const ALIEN_W = ALIEN[0].length // 20
+const ALIEN_H = ALIEN.length // 7
+
+// Same ACME alien at native size for the sidebar fallback.
+const MINI_ALIEN = toHalfBlocks(ACME_PIXELS)
 
 // ── Screensavers ──────────────────────────────────────────────────────────
 // Each saver: { name, stepMs, reset(w,h), tick(w,h), render(w,h,color) }.
@@ -192,6 +196,36 @@ function runFadeSequence(api, target, log, flag, onDone) {
   })
 }
 
+// Fade INTO idle: original theme -> -07 -> -05 -> -03 -> beib-dim (gradually
+// darker). onDim runs once fully dimmed (to reveal the saver); onAbort runs if
+// the flag is cleared mid-fade (user woke immediately), restoring the original.
+function runFadeInSequence(api, log, flag, savedTarget, onDim, onAbort) {
+  return new Promise((resolve) => {
+    let step = 0
+    function next() {
+      if (!existsSync(flag)) {
+        log("fade-in: aborted, flag cleared")
+        api.theme.set(savedTarget)
+        if (onAbort) onAbort()
+        resolve()
+        return
+      }
+      if (step >= FADE_IN_THEMES.length) {
+        const ok = api.theme.set(DIM_THEME)
+        log(`fade-in: dim set ok=${ok}`)
+        if (onDim) onDim()
+        resolve()
+        return
+      }
+      const ok = api.theme.set(FADE_IN_THEMES[step])
+      log(`fade-in: step ${step} theme=${FADE_IN_THEMES[step]} ok=${ok}`)
+      step++
+      setTimeout(next, FADE_STEP_MS)
+    }
+    setTimeout(next, FADE_STEP_MS)
+  })
+}
+
 // Build opentui nodes without JSX.
 function el(type, props) {
   const node = createElement(type)
@@ -223,6 +257,7 @@ const tui = async (api) => {
   let saved = null
   let savedAccent = BRIGHT
   let fading = false
+  let fadingIn = false
   let lastTitle = ""
   const [isDim, setDim] = createSignal(false)
   const [animTick, bumpAnim] = createSignal(0)
@@ -233,6 +268,34 @@ const tui = async (api) => {
       log("wake: executed")
     } catch (e) {
       log(`wake: error ${e?.message || e}`)
+    }
+  }
+
+  // Bind "any key wakes" directly on the renderer's key emitter. This is more
+  // robust than @opentui/solid's useKeyboard(), which needs the solid
+  // RendererContext (unavailable from a slot getter, so it silently no-op'd and
+  // key dismissal "broke"). api.renderer is the CliRenderer; .keyInput is its
+  // key event emitter. Idempotent + lazy: re-tried on each app-slot render until
+  // the renderer is ready. A keypress only wakes while dimmed; it never consumes
+  // the event, so normal typing is unaffected.
+  let keyBound = false
+  const ensureKeyHandler = () => {
+    if (keyBound) return
+    try {
+      const r = api.renderer
+      const ki = r && (r.keyInput || r.keyHandler || r.input)
+      if (ki && typeof ki.on === "function") {
+        ki.on("keypress", () => {
+          if (isDim()) {
+            log("keypress: wake")
+            wakeUp()
+          }
+        })
+        keyBound = true
+        log("keypress handler bound (api.renderer.keyInput)")
+      }
+    } catch (e) {
+      log(`keypress bind error ${e?.message || e}`)
     }
   }
 
@@ -305,12 +368,15 @@ const tui = async (api) => {
   const apply = () => {
     try {
       const idle = existsSync(flag)
-      setDim(idle)
+      // Bind the key handler as soon as the renderer exists (idempotent).
+      ensureKeyHandler()
       if (!api.theme.ready) {
         log("apply: theme not ready")
         return
       }
       if (idle && saved === null) {
+        // ENTER idle: fade IN (bright -> dark), then reveal the saver.
+        if (fadingIn) return
         const has = api.theme.has(DIM_THEME)
         if (!has) {
           log(`apply: theme ${DIM_THEME} not found; selected=${api.theme.selected}`)
@@ -326,16 +392,35 @@ const tui = async (api) => {
         }
         const current = api.theme.selected
         saved = current && current !== DIM_THEME ? current : "system"
-        const ok = api.theme.set(DIM_THEME)
-        log(`apply: set dim ok=${ok} saved=${saved} accent=${savedAccent}`)
-        if (ok) {
-          pickSaver()
-          startSaver()
-        }
+        fadingIn = true
+        log(`apply: fade-in start saved=${saved} accent=${savedAccent}`)
+        runFadeInSequence(
+          api,
+          log,
+          flag,
+          saved,
+          () => {
+            // Fully dimmed: show the overlay and start the screensaver.
+            setDim(true)
+            pickSaver()
+            startSaver()
+            log("apply: fade-in complete, saver started")
+          },
+          () => {
+            // Woke during fade-in: revert to a clean active state.
+            setDim(false)
+            saved = null
+            log("apply: fade-in aborted (woke early)")
+          },
+        ).finally(() => {
+          fadingIn = false
+        })
       } else if (!idle && saved !== null) {
+        // EXIT idle: hide overlay immediately, then fade OUT (dark -> bright).
         if (!fading) {
           stopSaver()
           activeSaver = null
+          setDim(false)
           fading = true
           const target = saved
           setTimeout(() => {
@@ -347,14 +432,15 @@ const tui = async (api) => {
           }, 100)
           log(`apply: starting fade to ${target}`)
         }
-      } else if (!idle && api.theme.selected === DIM_THEME) {
+      } else if (!idle && api.theme.selected === DIM_THEME && !fading && !fadingIn) {
         stopSaver()
         activeSaver = null
+        setDim(false)
         const ok = api.theme.set("system")
         log(`apply: heal ok=${ok} (selected was ${DIM_THEME} without flag)`)
       }
-      // Ensure the saver runs whenever dimmed (covers re-idle during fade).
-      if (isDim() && !saverTimer) {
+      // Ensure the saver runs whenever fully dimmed (covers re-idle edge cases).
+      if (isDim() && !saverTimer && !fadingIn) {
         if (!activeSaver) pickSaver()
         startSaver()
       }
@@ -452,13 +538,7 @@ const tui = async (api) => {
     api.slots.register({
       slots: {
         app() {
-          try {
-            if (otui.useKeyboard) {
-              otui.useKeyboard(() => {
-                if (isDim()) wakeUp()
-              })
-            }
-          } catch {}
+          ensureKeyHandler()
           return el("box", {
             get position() {
               return isDim() ? "absolute" : "relative"

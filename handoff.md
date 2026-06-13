@@ -1,6 +1,6 @@
 # Handoff — opencode-idle-dim
 
-Fecha: 2026-06-13. Estado: **v4 (screensaver system)** instalado y commiteado (`f216a3d`). Pendiente: verificación visual de Beib del último cambio (alien medio-bloque + barra sola + un solo color). Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
+Fecha: 2026-06-13. Estado: **v4 (screensaver system)** instalado y commiteado. Último cambio: alien = **logo ACME rasterizado del SVG** (aspect-correct, sin deformar), **fade-in al entrar** en idle, y **despertar con cualquier tecla arreglado** (binding directo en `api.renderer.keyInput`). Verificación visual de Beib: ✅ OK (alien, fade-in y wake-con-tecla confirmados en vivo). Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
 
 ## Qué es esto
 
@@ -32,17 +32,20 @@ Todo en `plugin/idle-dim.js` (~430 líneas). El idle fun mode es un **overlay en
   { name, stepMs, reset(w,h), tick(w,h), render(w,h,color) -> nodes[] }
   ```
   `startSaver()` corre un `setInterval(activeSaver.stepMs)` que llama `tick(w,h)` y hace `bumpAnim` (un signal que dispara el re-render del getter). `stopSaver()` limpia. Todos los timers con `.unref?.()`.
-- **Saver 1 — alien (DVD bounce)**: `makeAlienSaver`. Un space-invader que rebota por la pantalla (rebota en bordes, área `y ∈ [3,h)`). Se dibuja con **medios-bloques** (ver abajo) → 13 cols × 6 filas.
+- **Saver 1 — alien (DVD bounce)**: `makeAlienSaver`. El **logo ACME** rasterizado del SVG (ver abajo) que rebota por la pantalla (rebota en bordes, área `y ∈ [3,h)`). Grilla nativa 10×7 px, escalada 2× con `scalePixels` y dibujada con **medios-bloques** → 20 cols × 7 filas, aspect ratio 10:7 exacto.
 - **Saver 2 — progress (loading 8-bit)**: `makeProgressSaver`. SOLO una barra pixelada: frame de bloques `█` + 12 segmentos chunky de 2 anchos que se llenan y loopean (sube `pct`, al 100% hold ~1.3s y reset). Sin la palabra "LOADING" (Beib la sacó: quedaba enorme).
 - **Un solo color**: `savedAccent` se captura del theme activo **antes** de dimmear, en `apply()`: `api.theme.current.primary || .accent || .text || BRIGHT`. Se pasa a `render(w,h,color)` y se usa en alien, barra, header y hint. Si la terminal de Beib es naranja, todo sale naranja. (Antes el alien hacía color-flip arcoíris en cada rebote; se eliminó por pedido.)
 - **Header de identidad (CRÍTICO)**: como el overlay tapa el `sidebar_title`, el overlay dibuja arriba-izquierda (rendered last, encima del saver) dos líneas: `▶ <nombre>` (color accent) + la carpeta (gris `#8a8a8a`). El nombre se captura del slot `sidebar_title` (`props.title → lastTitle`); la carpeta de `api.state.path.directory || worktree || process.cwd()`, abreviada con `~`. Los 3 primeros renglones quedan reservados para que el saver no lo tape.
-- **Dismiss**: `useKeyboard` (cualquier tecla, best-effort, accedido como `otui.useKeyboard` para no romper si no existe) + comando ⌘K "Wake Up (exit idle)" (`api.command.register`) + `/active`. Los tres corren `wakeUp()` que ejecuta `opencode-iterm-state active`.
+- **Dismiss**: cualquier tecla, vía binding directo `api.renderer.keyInput.on("keypress", …)` en `ensureKeyHandler()` (idempotente, re-intentado en cada render del slot hasta que el renderer exista) + comando ⌘K "Wake Up (exit idle)" (`api.command.register`, deprecado pero funcional) + `/active`. Los tres corren `wakeUp()` que ejecuta `opencode-iterm-state active`. **No usar `useKeyboard()` de @opentui/solid desde un slot**: necesita el `RendererContext` de Solid y falla silenciosamente (así estuvo roto el wake-con-tecla). `api.renderer` ES el `CliRenderer` (confirmado en `@opencode-ai/plugin` tui.d.ts).
 - **Otros slots**: `sidebar_title` (título naranja + captura de `lastTitle`, nunca null), `sidebar_content` (mini alien fallback, garantiza algo visible si el overlay no pinta), `session_prompt_right` (💤 al lado del prompt).
-- **Fade de despertar**: `runFadeSequence` pasa `beib-dim` → `beib-dim-03` → `-05` → `-07` → theme original, 400ms por paso (~1.6s). Cancelable: si reaparece el flag aborta y vuelve a `beib-dim`; `fading` guard evita fades duplicados; `saved` se preserva en abort.
+- **Fade de ENTRADA** (`runFadeInSequence`, guard `fadingIn`): al aparecer el flag pasa original → `beib-dim-07` → `-05` → `-03` → `beib-dim` (oscurece gradual, 400ms/paso). El overlay+saver **recién se muestran al llegar a `beib-dim`** (`setDim(true)` en el callback `onDim`), así se ve oscurecer antes de aparecer el screensaver. Si el flag desaparece a mitad (despertaste rápido) aborta y vuelve al theme original.
+- **Fade de DESPERTAR**: `runFadeSequence` pasa `beib-dim` → `beib-dim-03` → `-05` → `-07` → theme original, 400ms por paso (~1.6s). Cancelable: si reaparece el flag aborta y vuelve a `beib-dim`; `fading` guard evita fades duplicados; `saved` se preserva en abort.
 
 ### Medios-bloques (fix del alien deforme)
 
-En terminal cada char es ~2:1 (más alto que ancho), así que un sprite full-block se ve **estirado**. Solución: `toHalfBlocks(rows)` toma una grilla de píxeles (strings, `#`=lleno) y combina cada par de filas en una fila de chars usando `▀▄█` → píxeles cuadrados. El alien y el mini-alien se definen como grilla de píxeles y se convierten en carga del módulo. **Para cualquier sprite nuevo, usar este patrón.**
+En terminal cada char es ~2:1 (más alto que ancho), así que un sprite full-block se ve **estirado**. Solución: `toHalfBlocks(rows)` toma una grilla de píxeles (strings, `#`=lleno) y combina cada par de filas en una fila de chars usando `▀▄█` → píxeles cuadrados. `scalePixels(rows, sx, sy)` agranda la grilla por factores enteros sin deformar (para hacer el sprite más grande manteniendo aspect ratio). **Para cualquier sprite nuevo, usar este patrón.**
+
+**El alien ACME** (`ACME_PIXELS`) se rasterizó directo del SVG (`acme-alien-logo.png`/SVG, viewBox 362.78×259.62 sobre grilla de 30.71u → 10 cols × 7 filas de píxeles; cada celda del logo = 1 `#`). Se escala `scalePixels(ACME_PIXELS, 2, 2)` → 20×14 px → `toHalfBlocks` → 20 cols × 7 char-rows, aspect 10:7 exacto. El `MINI_ALIEN` (sidebar) usa el mismo `ACME_PIXELS` a tamaño nativo. **Si rehacés el sprite, editá `ACME_PIXELS` (es la fuente) y previsualizá con un script node antes de embeber.**
 
 ## Cómo agregar un saver nuevo
 
@@ -63,6 +66,8 @@ En terminal cada char es ~2:1 (más alto que ancho), así que un sprite full-blo
 8. **Reactividad en slots por getters en props** (`get fg()`, `get children()`), no por re-ejecutar la función del slot. El saver hace bump de `animTick` y los getters lo leen.
 9. **Aspect ratio:** sprites full-block se ven estirados; usar `toHalfBlocks` (trampa 2026-06-13).
 10. **El overlay `app` debe ser footprint-cero cuando NO está dim** (width/height 0, sin backgroundColor) o tapa la sesión normal. Todo por getters condicionados a `isDim()`.
+11. **Teclado**: `useKeyboard()` de @opentui/solid necesita el `RendererContext` de Solid; desde un slot getter no lo tiene y falla mudo (no despierta con tecla). Usar `api.renderer.keyInput.on("keypress", …)` directo (`api.renderer` es el `CliRenderer`). El listener NO consume el evento, así que no rompe el tipeo (trampa 2026-06-13).
+12. **`api.theme.current.*` son objetos `RGBA`, no strings.** Pasarlos a `fg` funciona; al loguearlos se ven como `rgba(0.32,…)` (sólo la stringificación). El accent del saver se captura así, antes de dimmear.
 
 ## Tests
 
@@ -75,7 +80,8 @@ Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mira
 
 ## Historia reciente (commits clave)
 
-- `f216a3d` — saca Pac-Man, alien medio-bloque (píxeles cuadrados), loading solo barra, un solo color del theme accent. **(HEAD)**
+- **(HEAD, este commit)** — alien = logo ACME rasterizado del SVG (aspect-correct vía `scalePixels`+`toHalfBlocks`), **fade-in al entrar** (`runFadeInSequence`), **fix despertar-con-tecla** (binding directo en `api.renderer.keyInput`, ya no `useKeyboard`), saca `ACME_GREEN` sin uso, agrega `.gitignore`, commitea `acme-alien-logo.png` (fuente del sprite) + `REPORTE-2026-06-12-incidente-idle.md`.
+- `f216a3d` — saca Pac-Man, alien medio-bloque (píxeles cuadrados), loading solo barra, un solo color del theme accent.
 - `6978234` — sistema de savers pluggables (random por /idle): alien chico, Pac-Man con fantasmas, barra LOADING 8-bit + header de identidad.
 - `a2e29a9` — screensaver DVD-bounce fullscreen vía slot `app` (sin rutas), dismiss con cualquier tecla.
 - `6ebdb0b` — **fix del incidente**: saca la ruta fullscreen que dejaba sin `/active` (trampa 7).
@@ -84,16 +90,16 @@ Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mira
 
 Specs/planes: `docs/superpowers/specs/2026-06-12-idle-fun-mode-design.md`, `docs/superpowers/plans/2026-06-12-idle-fun-mode-plan.md`, `.opencode/plans/1781290888739-silent-moon.md` (plan v4). Incidente: `REPORTE-2026-06-12-incidente-idle.md`.
 
-## Archivos sin trackear (decidir)
+## Archivos (resuelto en el commit HEAD)
 
-- `REPORTE-2026-06-12-incidente-idle.md` — vale la pena commitear (documenta la trampa 7).
-- `acme-alien-logo.png` — el SVG/PNG original del marciano ACME que dio origen al sprite.
-- `.playwright-mcp/` — artefactos de sesión, ignorar (agregar a `.gitignore`).
+- `REPORTE-2026-06-12-incidente-idle.md` — **commiteado** (documenta la trampa 7).
+- `acme-alien-logo.png` — **commiteado**, fuente del sprite `ACME_PIXELS`.
+- `.playwright-mcp/` — **ignorado** vía `.gitignore`.
 
 ## Próximos pasos / ideas
 
-- [ ] **Verificación visual de Beib** del último cambio (alien proporcionado, barra pixelada, un solo color, header visible en ambos savers).
-- [ ] Posibles savers nuevos: starfield/warp, matrix rain, acuario, snake. Mismo contrato + `toHalfBlocks`.
+- [x] ~~Verificación visual de Beib~~ — OK (alien ACME proporcionado, fade-in, despertar-con-tecla confirmados en vivo 2026-06-13).
+- [ ] Posibles savers nuevos: starfield/warp, matrix rain, acuario, snake. Mismo contrato + `toHalfBlocks` (+ `scalePixels` si querés agrandar).
 - [ ] Actualizar `README.md` (sigue describiendo el sidebar rotativo de v2, no el screensaver de v4).
 - [ ] Auto-idle: `api.event.on("session.status"/"session.idle")` para dimear tras N min sin actividad.
 - [ ] Opciones por `tui.json` (`["./plugin/idle-dim.js", { accent, savers, ... }]`): hoy el plugin ignora el segundo arg `options`.
