@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # Installs opencode-idle-dim into the standard locations:
-#   bin/opencode-iterm-state -> ~/.local/bin/opencode-iterm-state
-#   plugin/idle-dim.js       -> ~/.config/opencode/plugin/idle-dim.js
-#   themes/beib-dim.json     -> ~/.config/opencode/themes/beib-dim.json
-#   command/idle.md          -> ~/.config/opencode/command/idle.md
-#   command/active.md        -> ~/.config/opencode/command/active.md
+#   bin/opencode-iterm-state    -> ~/.local/bin/opencode-iterm-state
+#   plugin/idle-dim.js          -> ~/.config/opencode/plugin/idle-dim.js
+#   themes/beib-dim.json        -> ~/.config/opencode/themes/beib-dim.json
+#   themes/beib-dim-03/05/07.json -> ~/.config/opencode/themes/  (fade steps)
+#   command/idle.md             -> ~/.config/opencode/command/idle.md
+#   command/active.md           -> ~/.config/opencode/command/active.md
 # and registers the plugin in ~/.config/opencode/tui.json (created if missing,
 # merged if it already exists and python3 is available).
 
