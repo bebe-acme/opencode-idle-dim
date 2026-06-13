@@ -3,15 +3,20 @@
 // No signals, no iTerm color changes: pure opencode theme switching, so every
 // UI element (including generated whites/grays) dims uniformly.
 //
-// Idle fun mode lives in sidebar slots only. The plugin must NEVER touch
-// api.route: plugin routes render without the prompt/editor, so a fullscreen
-// idle route leaves the user unable to type /active (the session looks dead).
-// See handoff.md, trap 7.
+// Idle fun mode is a full-screen screensaver: the ACME alien bounces around the
+// terminal like a DVD logo, in a high-zIndex overlay rendered through the `app`
+// slot. The `app` slot draws ON TOP of the app WITHOUT replacing the prompt, so
+// the session is never "dead" — unlike api.route, which the plugin must NEVER
+// touch (a plugin route renders without the prompt; you cannot type /active and
+// the session looks frozen). See handoff.md, trap 7. Dismiss: ⌘K → Wake Up,
+// any key (useKeyboard), or /active.
+import * as otui from "@opentui/solid"
 import { watch, existsSync, mkdirSync, appendFileSync } from "node:fs"
 import { execSync } from "node:child_process"
 import { homedir } from "node:os"
-import { createElement, spread } from "@opentui/solid"
 import { createSignal } from "solid-js"
+
+const { createElement, spread } = otui
 
 const DIM_THEME = "beib-dim"
 const BRIGHT = "#ff9a00" // readable accent color while dimmed
@@ -19,77 +24,26 @@ const ACME_GREEN = "#00ff2a"
 const DIR = process.env.OPENCODE_IDLE_DIR || `${homedir()}/.local/state/opencode-idle`
 const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"]
 const FADE_STEP_MS = 400
-const ROTATION_BASE_MS = 8000
-const ROTATION_JITTER_MS = 4000
+const SAVER_STEP_MS = 110 // bounce tick — lower is faster/smoother
 
-// Idle animations. Each entry is either:
-//   { type, color, anim: [frameLines[]], frameMs }  — multi-frame animation
-//   { type, color, lines }                           — static text
-// Aliens ~60%, phrases ~30%, emoji ~10%. All lines ≤27 cols.
-const FRAMES = [
-  {
-    type: "alien",
-    color: ACME_GREEN,
-    frameMs: 380,
-    anim: [
-      ["      ████", "    ████████", "   ██████████", "  ████    ████", "  ████████████", "   ████  ████", "    ████████", "     ██  ██"],
-      ["      ████", "  ████████████", " █████    █████", " ██████████████", "  █████  █████", "   ██████████", "    ███  ███", "     ██  ██"],
-      ["      ████", "    ████████", "   ██████████", "  ████    ████", "  ████████████", "   ████  ████", "    ████████", "     ██  ██"],
-      ["      ████", "    ████████", "   ██████████", "  ███      ███", "  ████████████", "   ███    ███", "    ████████", "     ██  ██"],
-    ],
-  },
-  {
-    type: "alien",
-    color: "#00ffcc",
-    frameMs: 500,
-    anim: [
-      ["   ██    ██", " ████  ████", "   ██    ██", "   ████████", "     ████"],
-      ["    ██  ██", "  ████████", "    ██  ██", "    ██████", "     ████"],
-      ["   ██    ██", " ████  ████", "   ██    ██", "   ████████", "     ████"],
-      ["  ██      ██", "████    ████", "  ██      ██", "  ██████████", "    ██████"],
-    ],
-  },
-  {
-    type: "alien",
-    color: ACME_GREEN,
-    frameMs: 250,
-    anim: [
-      ["  ✦", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "  ✦"],
-      [" ✦ ", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", " ✦ "],
-      ["  ✦", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "   ✦"],
-      ["✦  ", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "  ✦"],
-    ],
-  },
-  { type: "phrase", color: BRIGHT, lines: ["beib.exe has stopped", "responding", "(￣▽￣)~*  z Z z"] },
-  { type: "phrase", color: BRIGHT, lines: ["💤 beib is dreaming...", "afk but vibes remain"] },
-  { type: "phrase", color: BRIGHT, lines: ["🌙 ·  ·  ·  ✨", "stars passing by"] },
-  { type: "phrase", color: "#888888", lines: ["♪♫•*¨*•.¸¸", "background music", "¸¸.•*¨*•♫♪"] },
-  { type: "phrase", color: BRIGHT, lines: ["loading beib.dll ... zzz"] },
-  { type: "emoji", color: BRIGHT, lines: ["（◎−◎；）zZz"] },
-  { type: "emoji", color: BRIGHT, lines: ["🐱  =^..^=", "cat guardian mode"] },
-  { type: "emoji", color: BRIGHT, lines: ["⚡ idle · beib afk"] },
+// ACME alien for the bouncing screensaver (classic invader silhouette).
+const ALIEN = [
+  "    ██          ██    ",
+  "      ██      ██      ",
+  "    ██████████████    ",
+  "  ████  ██████  ████  ",
+  "██████████████████████",
+  "██  ██████████████  ██",
+  "██  ██          ██  ██",
+  "      ████  ████      ",
 ]
+const ALIEN_W = 22
+const ALIEN_H = 8
+// DVD-logo style: color flips on each wall bounce.
+const SAVER_COLORS = ["#00ff2a", "#00ffcc", "#ff9a00", "#ff4fd8", "#5b8cff", "#fff35c"]
 
-let sceneIdx = 0
-let scene = FRAMES[0]
-let animFrame = 0
-
-function pickScene() {
-  const roll = Math.random()
-  const type = roll < 0.6 ? "alien" : roll < 0.9 ? "phrase" : "emoji"
-  const pool = FRAMES.filter((f) => f.type === type)
-  const next = pool[Math.floor(Math.random() * pool.length)] || FRAMES[0]
-  if (next.type === scene.type && pool.length > 1) {
-    const others = pool.filter((f) => f !== next)
-    if (others.length) return others[Math.floor(Math.random() * others.length)]
-  }
-  return next
-}
-
-function nextScene() { sceneIdx++; scene = pickScene(); animFrame = 0 }
-function advanceAnim() { if (scene.anim) animFrame++ }
-function currentLines() { return scene.anim ? scene.anim[animFrame % scene.anim.length] : scene.lines }
-function currentColor() { return scene.color || ACME_GREEN }
+// Compact alien for the sidebar fallback (shown if the overlay can't paint).
+const MINI_ALIEN = ["  ██    ██  ", "  ████████  ", " ██  ██  ██ ", " ██████████ ", "  ██    ██  "]
 
 function runFadeSequence(api, target, log, flag, onDone) {
   return new Promise((resolve) => {
@@ -147,41 +101,60 @@ const tui = async (api) => {
   const flag = `${DIR}/${tty}.flag`
   let saved = null
   let fading = false
-  let rotationTimer = null
   const [isDim, setDim] = createSignal(false)
   const [animTick, bumpAnim] = createSignal(0)
 
-  let animTimer = null
-  const startAnim = () => {
-    if (animTimer) return
-    const ms = scene.frameMs || 350
-    animTimer = setInterval(() => {
-      if (!isDim()) { stopAnim(); return }
-      advanceAnim()
+  // One-click wake: run the active script (removes the flag → fade restore).
+  const wakeUp = () => {
+    try {
+      execSync(`${homedir()}/.local/bin/opencode-iterm-state active`, { encoding: "utf8", timeout: 5000 })
+      log("wake: executed")
+    } catch (e) {
+      log(`wake: error ${e?.message || e}`)
+    }
+  }
+
+  // Screensaver bounce state.
+  let sx = 4
+  let sy = 2
+  let sdx = 1
+  let sdy = 1
+  let scolor = 0
+  let saverTimer = null
+
+  const termSize = () => {
+    const r = api.renderer || {}
+    const w = r.width || r.terminalWidth || r.cols || (r.terminal && r.terminal.width) || 80
+    const h = r.height || r.terminalHeight || r.rows || (r.terminal && r.terminal.height) || 24
+    return { w: Math.max(w, ALIEN_W + 2), h: Math.max(h, ALIEN_H + 2) }
+  }
+
+  const startSaver = () => {
+    if (saverTimer) return
+    saverTimer = setInterval(() => {
+      if (!isDim()) {
+        stopSaver()
+        return
+      }
+      const { w, h } = termSize()
+      sx += sdx
+      sy += sdy
+      let bounced = false
+      if (sx <= 0) { sx = 0; sdx = 1; bounced = true }
+      if (sx + ALIEN_W >= w) { sx = w - ALIEN_W; sdx = -1; bounced = true }
+      if (sy <= 0) { sy = 0; sdy = 1; bounced = true }
+      if (sy + ALIEN_H >= h) { sy = h - ALIEN_H; sdy = -1; bounced = true }
+      if (bounced) scolor = (scolor + 1) % SAVER_COLORS.length
       bumpAnim((v) => v + 1)
-    }, ms)
-    animTimer.unref?.()
-  }
-  const stopAnim = () => { if (animTimer) { clearInterval(animTimer); animTimer = null } }
-  const restartAnim = () => { stopAnim(); startAnim() }
-
-  const startRotation = () => {
-    if (rotationTimer) return
-    rotationTimer = setInterval(
-      () => {
-        if (!isDim()) { stopRotation(); stopAnim(); return }
-        nextScene()
-        restartAnim()
-        bumpAnim((v) => v + 1)
-      },
-      ROTATION_BASE_MS + Math.floor(Math.random() * ROTATION_JITTER_MS),
-    )
-    rotationTimer.unref?.()
+    }, SAVER_STEP_MS)
+    saverTimer.unref?.()
   }
 
-  const stopRotation = () => {
-    if (rotationTimer) { clearInterval(rotationTimer); rotationTimer = null }
-    stopAnim()
+  const stopSaver = () => {
+    if (saverTimer) {
+      clearInterval(saverTimer)
+      saverTimer = null
+    }
   }
 
   const apply = () => {
@@ -198,17 +171,16 @@ const tui = async (api) => {
           log(`apply: theme ${DIM_THEME} not found; selected=${api.theme.selected}`)
           return
         }
-        // Never record the dim theme itself as the previous theme (covers
-        // restarts that happen while the flag exists and kv persisted the dim).
+        // Never record the dim theme itself as the previous theme.
         const current = api.theme.selected
         saved = current && current !== DIM_THEME ? current : "system"
         const ok = api.theme.set(DIM_THEME)
         log(`apply: set dim ok=${ok} saved=${saved}`)
-        if (ok) { startAnim(); startRotation() }
+        if (ok) startSaver()
       } else if (!idle && saved !== null) {
         // Wake-up fade sequence.
         if (!fading) {
-          stopRotation()
+          stopSaver()
           fading = true
           const target = saved
           setTimeout(() => {
@@ -221,25 +193,20 @@ const tui = async (api) => {
           log(`apply: starting fade to ${target}`)
         }
       } else if (!idle && api.theme.selected === DIM_THEME) {
-        // Instance started dimmed (flag was removed while it was down, or kv
-        // kept the dim theme): heal back to system.
-        stopRotation()
+        // Instance started dimmed (flag removed while it was down): heal.
+        stopSaver()
         const ok = api.theme.set("system")
         log(`apply: heal ok=${ok} (selected was ${DIM_THEME} without flag)`)
       }
-      // Ensure rotation is running whenever dimmed (covers re-idle during fade).
-      if (isDim() && !rotationTimer) {
-        startAnim()
-        startRotation()
-      }
+      // Ensure the saver runs whenever dimmed (covers re-idle during fade).
+      if (isDim() && !saverTimer) startSaver()
     } catch (e) {
       log(`apply: error ${e?.message || e}`)
     }
   }
 
-  // Keep the sidebar session title readable while dimmed: win the
-  // sidebar_title slot and only change the fg color reactively. Never return
-  // null (single_winner decides fallback at initial render).
+  // Keep the sidebar session title readable while dimmed: win the sidebar_title
+  // slot and only change the fg color reactively. Never return null.
   try {
     api.slots.register({
       slots: {
@@ -271,7 +238,8 @@ const tui = async (api) => {
     log(`slot register error ${e?.message || e}`)
   }
 
-  // Idle fun content: animated frames centered in sidebar (append slot).
+  // Sidebar fallback: small alien + hint when dimmed. The screensaver overlay
+  // normally covers this; it stays as a guaranteed-visible indicator.
   try {
     api.slots.register({
       slots: {
@@ -281,15 +249,13 @@ const tui = async (api) => {
             alignItems: "center",
             get children() {
               if (!isDim()) return []
-              animTick() // reactive: re-renders on each animation frame
-              const lines = currentLines()
-              const color = currentColor()
+              animTick()
               return [
                 el("box", { height: 1 }),
-                ...lines.map((line) => el("text", { fg: color, children: line })),
+                ...MINI_ALIEN.map((line) => el("text", { fg: ACME_GREEN, children: line })),
                 el("box", { height: 1 }),
                 el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
-                el("text", { fg: BRIGHT, children: "💤 idle · /active or ⌘K → Wake Up" }),
+                el("text", { fg: BRIGHT, children: "💤 idle · ⌘K → Wake Up" }),
               ]
             },
           })
@@ -301,8 +267,7 @@ const tui = async (api) => {
     log(`sidebar_content slot error ${e?.message || e}`)
   }
 
-  // Subtle indicator next to the prompt, visible even when the sidebar is
-  // hidden. Empty string while active so nothing renders.
+  // Subtle indicator next to the prompt, visible even when sidebar is hidden.
   try {
     api.slots.register({
       slots: {
@@ -321,25 +286,83 @@ const tui = async (api) => {
     log(`session_prompt_right slot error ${e?.message || e}`)
   }
 
+  // Screensaver: full-screen overlay in the `app` slot (renders on top of the
+  // app, above the active route, WITHOUT replacing the prompt). Only paints
+  // while dimmed; zero footprint otherwise.
+  try {
+    api.slots.register({
+      slots: {
+        app() {
+          // Dismiss on any key while idle (best-effort; ⌘K is the guaranteed path).
+          try {
+            if (otui.useKeyboard) {
+              otui.useKeyboard(() => {
+                if (isDim()) wakeUp()
+              })
+            }
+          } catch {}
+          return el("box", {
+            get position() {
+              return isDim() ? "absolute" : "relative"
+            },
+            get left() {
+              return isDim() ? 0 : undefined
+            },
+            get top() {
+              return isDim() ? 0 : undefined
+            },
+            get width() {
+              return isDim() ? "100%" : 0
+            },
+            get height() {
+              return isDim() ? "100%" : 0
+            },
+            get zIndex() {
+              return isDim() ? 9999 : 0
+            },
+            get backgroundColor() {
+              return isDim() ? "#000000" : undefined
+            },
+            get children() {
+              if (!isDim()) return []
+              animTick()
+              const color = SAVER_COLORS[scolor % SAVER_COLORS.length]
+              const alien = el("box", {
+                position: "absolute",
+                left: Math.round(sx),
+                top: Math.round(sy),
+                flexDirection: "column",
+                children: ALIEN.map((line) => el("text", { fg: color, children: line })),
+              })
+              const hint = el("box", {
+                position: "absolute",
+                left: 0,
+                bottom: 1,
+                width: "100%",
+                justifyContent: "center",
+                children: [
+                  el("text", { fg: BRIGHT, children: "💤  idle  ·  press any key or ⌘K → Wake Up" }),
+                ],
+              })
+              return [alien, hint]
+            },
+          })
+        },
+      },
+    })
+    log("slot app (screensaver) registered")
+  } catch (e) {
+    log(`app slot error ${e?.message || e}`)
+  }
+
   // One-click deactivation: register a "Wake Up" command in the palette (⌘K).
-  // It runs the active script, same as typing /active.
   try {
     api.command.register(() => [
       {
         title: "Wake Up (exit idle)",
         value: "idle-dim:wake",
         group: "Session",
-        onSelect: () => {
-          try {
-            execSync(`${homedir()}/.local/bin/opencode-iterm-state active`, {
-              encoding: "utf8",
-              timeout: 5000,
-            })
-            log("command: wake executed via palette")
-          } catch (e) {
-            log(`command: wake error ${e?.message || e}`)
-          }
-        },
+        onSelect: () => wakeUp(),
       },
     ])
     log("command palette wake registered")
