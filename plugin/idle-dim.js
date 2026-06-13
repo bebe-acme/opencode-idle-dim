@@ -22,65 +22,74 @@ const FADE_STEP_MS = 400
 const ROTATION_BASE_MS = 8000
 const ROTATION_JITTER_MS = 4000
 
-// Sidebar-safe idle frames: every line stays under ~27 columns so nothing
-// wraps in the sidebar. type drives the rotation weights in pickFrame.
+// Idle animations. Each entry is either:
+//   { type, color, anim: [frameLines[]], frameMs }  — multi-frame animation
+//   { type, color, lines }                           — static text
+// Aliens ~60%, phrases ~30%, emoji ~10%. All lines ≤27 cols.
 const FRAMES = [
   {
     type: "alien",
     color: ACME_GREEN,
-    lines: [
-      "   ██       █████       ██",
-      "     ██  ██████████  ██",
-      "      █████████████████",
-      "        █████████████",
-      "      ████   ████   ████",
-      "      █████████████████",
-      "        █████████████",
-      "          ███     ███",
+    frameMs: 380,
+    anim: [
+      ["      ████", "    ████████", "   ██████████", "  ████    ████", "  ████████████", "   ████  ████", "    ████████", "     ██  ██"],
+      ["      ████", "  ████████████", " █████    █████", " ██████████████", "  █████  █████", "   ██████████", "    ███  ███", "     ██  ██"],
+      ["      ████", "    ████████", "   ██████████", "  ████    ████", "  ████████████", "   ████  ████", "    ████████", "     ██  ██"],
+      ["      ████", "    ████████", "   ██████████", "  ███      ███", "  ████████████", "   ███    ███", "    ████████", "     ██  ██"],
+    ],
+  },
+  {
+    type: "alien",
+    color: "#00ffcc",
+    frameMs: 500,
+    anim: [
+      ["   ██    ██", " ████  ████", "   ██    ██", "   ████████", "     ████"],
+      ["    ██  ██", "  ████████", "    ██  ██", "    ██████", "     ████"],
+      ["   ██    ██", " ████  ████", "   ██    ██", "   ████████", "     ████"],
+      ["  ██      ██", "████    ████", "  ██      ██", "  ██████████", "    ██████"],
     ],
   },
   {
     type: "alien",
     color: ACME_GREEN,
-    lines: ["  ██    ██", "████  ████", "  ██    ██", "  ████████", "    ████"],
+    frameMs: 250,
+    anim: [
+      ["  ✦", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "  ✦"],
+      [" ✦ ", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", " ✦ "],
+      ["  ✦", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "   ✦"],
+      ["✦  ", "    ████", "  ████████", "  ██    ██", "  ████████", "    ████", "  ✦"],
+    ],
   },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    lines: ["beib.exe has stopped", "responding", "(￣▽￣)~*  z Z z"],
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    lines: ["💤 beib is dreaming...", "afk but vibes remain"],
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    lines: ["🌙 ·  ·  ·  ✨", "stars passing by"],
-  },
-  {
-    type: "phrase",
-    color: "#888888",
-    lines: ["♪♫•*¨*•.¸¸", "background music", "¸¸.•*¨*•♫♪"],
-  },
-  {
-    type: "phrase",
-    color: BRIGHT,
-    lines: ["loading beib.dll ... zzz"],
-  },
+  { type: "phrase", color: BRIGHT, lines: ["beib.exe has stopped", "responding", "(￣▽￣)~*  z Z z"] },
+  { type: "phrase", color: BRIGHT, lines: ["💤 beib is dreaming...", "afk but vibes remain"] },
+  { type: "phrase", color: BRIGHT, lines: ["🌙 ·  ·  ·  ✨", "stars passing by"] },
+  { type: "phrase", color: "#888888", lines: ["♪♫•*¨*•.¸¸", "background music", "¸¸.•*¨*•♫♪"] },
+  { type: "phrase", color: BRIGHT, lines: ["loading beib.dll ... zzz"] },
   { type: "emoji", color: BRIGHT, lines: ["（◎−◎；）zZz"] },
   { type: "emoji", color: BRIGHT, lines: ["🐱  =^..^=", "cat guardian mode"] },
   { type: "emoji", color: BRIGHT, lines: ["⚡ idle · beib afk"] },
 ]
 
-function pickFrame() {
-  // Aliens ~60% of the time, phrases ~30%, emoji ~10%.
+let sceneIdx = 0
+let scene = FRAMES[0]
+let animFrame = 0
+
+function pickScene() {
   const roll = Math.random()
   const type = roll < 0.6 ? "alien" : roll < 0.9 ? "phrase" : "emoji"
-  const pool = FRAMES.filter((frame) => frame.type === type)
-  return pool[Math.floor(Math.random() * pool.length)] || FRAMES[0]
+  const pool = FRAMES.filter((f) => f.type === type)
+  const next = pool[Math.floor(Math.random() * pool.length)] || FRAMES[0]
+  if (next.type === scene.type && pool.length > 1) {
+    const others = pool.filter((f) => f !== next)
+    if (others.length) return others[Math.floor(Math.random() * others.length)]
+  }
+  return next
 }
+
+function nextScene() { sceneIdx++; scene = pickScene(); animFrame = 0 }
+function advanceAnim() { if (scene.anim) animFrame++ }
+function currentLines() { return scene.anim ? scene.anim[animFrame % scene.anim.length] : scene.lines }
+function currentColor() { return scene.color || ACME_GREEN }
 
 function runFadeSequence(api, target, log, flag, onDone) {
   return new Promise((resolve) => {
@@ -140,17 +149,30 @@ const tui = async (api) => {
   let fading = false
   let rotationTimer = null
   const [isDim, setDim] = createSignal(false)
-  const [frameTick, bumpFrameTick] = createSignal(0)
+  const [animTick, bumpAnim] = createSignal(0)
+
+  let animTimer = null
+  const startAnim = () => {
+    if (animTimer) return
+    const ms = scene.frameMs || 350
+    animTimer = setInterval(() => {
+      if (!isDim()) { stopAnim(); return }
+      advanceAnim()
+      bumpAnim((v) => v + 1)
+    }, ms)
+    animTimer.unref?.()
+  }
+  const stopAnim = () => { if (animTimer) { clearInterval(animTimer); animTimer = null } }
+  const restartAnim = () => { stopAnim(); startAnim() }
 
   const startRotation = () => {
     if (rotationTimer) return
     rotationTimer = setInterval(
       () => {
-        if (!isDim()) {
-          stopRotation()
-          return
-        }
-        bumpFrameTick((value) => value + 1)
+        if (!isDim()) { stopRotation(); stopAnim(); return }
+        nextScene()
+        restartAnim()
+        bumpAnim((v) => v + 1)
       },
       ROTATION_BASE_MS + Math.floor(Math.random() * ROTATION_JITTER_MS),
     )
@@ -158,10 +180,8 @@ const tui = async (api) => {
   }
 
   const stopRotation = () => {
-    if (rotationTimer) {
-      clearInterval(rotationTimer)
-      rotationTimer = null
-    }
+    if (rotationTimer) { clearInterval(rotationTimer); rotationTimer = null }
+    stopAnim()
   }
 
   const apply = () => {
@@ -184,7 +204,7 @@ const tui = async (api) => {
         saved = current && current !== DIM_THEME ? current : "system"
         const ok = api.theme.set(DIM_THEME)
         log(`apply: set dim ok=${ok} saved=${saved}`)
-        if (ok) startRotation()
+        if (ok) { startAnim(); startRotation() }
       } else if (!idle && saved !== null) {
         // Wake-up fade sequence.
         if (!fading) {
@@ -209,6 +229,7 @@ const tui = async (api) => {
       }
       // Ensure rotation is running whenever dimmed (covers re-idle during fade).
       if (isDim() && !rotationTimer) {
+        startAnim()
         startRotation()
       }
     } catch (e) {
@@ -250,22 +271,23 @@ const tui = async (api) => {
     log(`slot register error ${e?.message || e}`)
   }
 
-  // Idle fun content: rotating frames in the sidebar (append slot). The box is
-  // always returned; only its children react to isDim/frameTick, mirroring the
-  // proven getter pattern from sidebar_title.
+  // Idle fun content: animated frames centered in sidebar (append slot).
   try {
     api.slots.register({
       slots: {
         sidebar_content(ctx) {
           return el("box", {
             flexDirection: "column",
+            alignItems: "center",
             get children() {
               if (!isDim()) return []
-              frameTick()
-              const frame = pickFrame()
+              animTick() // reactive: re-renders on each animation frame
+              const lines = currentLines()
+              const color = currentColor()
               return [
                 el("box", { height: 1 }),
-                ...frame.lines.map((line) => el("text", { fg: frame.color, children: line })),
+                ...lines.map((line) => el("text", { fg: color, children: line })),
+                el("box", { height: 1 }),
                 el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
                 el("text", { fg: BRIGHT, children: "💤 idle · /active or ⌘K → Wake Up" }),
               ]
