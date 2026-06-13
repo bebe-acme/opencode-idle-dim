@@ -9,8 +9,10 @@
 // unlike api.route, which the plugin must NEVER touch (a plugin route renders
 // without the prompt; you cannot type /active and the session looks frozen).
 // See handoff.md, trap 7. A persistent header (project name + folder) renders on
-// top of every saver so a parked session is always identifiable. Dismiss: any
-// key (useKeyboard), ⌘K → Wake Up, or /active.
+// top of every saver so a parked session is always identifiable. One color is
+// used everywhere, captured from the active theme accent before dimming. Sprites
+// use half-block characters (▀▄█) so pixels are square instead of stretched.
+// Dismiss: any key (useKeyboard), ⌘K → Wake Up, or /active.
 import * as otui from "@opentui/solid"
 import { watch, existsSync, mkdirSync, appendFileSync } from "node:fs"
 import { execSync } from "node:child_process"
@@ -20,85 +22,76 @@ import { createSignal } from "solid-js"
 const { createElement, spread } = otui
 
 const DIM_THEME = "beib-dim"
-const BRIGHT = "#ff9a00" // readable accent color while dimmed
+const BRIGHT = "#ff9a00" // fallback accent when the theme accent can't be read
 const ACME_GREEN = "#00ff2a"
 const DIR = process.env.OPENCODE_IDLE_DIR || `${homedir()}/.local/state/opencode-idle`
 const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"]
 const FADE_STEP_MS = 400
 
-// DVD-logo style palette: color flips on each wall bounce.
-const SAVER_COLORS = ["#00ff2a", "#00ffcc", "#ff9a00", "#ff4fd8", "#5b8cff", "#fff35c"]
+// Convert a pixel grid (strings; any non-space/non-dot char = filled) into
+// half-block rows so each character holds two vertical pixels — square pixels,
+// no vertical stretch.
+function toHalfBlocks(rows) {
+  const h = rows.length
+  const w = Math.max(...rows.map((r) => r.length))
+  const g = rows.map((r) => r.padEnd(w, " ").split("").map((c) => c !== " " && c !== "."))
+  const out = []
+  for (let y = 0; y < h; y += 2) {
+    let line = ""
+    for (let x = 0; x < w; x++) {
+      const t = g[y][x]
+      const b = y + 1 < h ? g[y + 1][x] : false
+      line += t && b ? "█" : t ? "▀" : b ? "▄" : " "
+    }
+    out.push(line)
+  }
+  return out
+}
 
-// Small classic invader for the bouncing screensaver (11x8).
-const ALIEN = [
-  "  █     █  ",
-  "   █   █   ",
-  "  ███████  ",
-  " ██ ███ ██ ",
-  "███████████",
-  "█ ███████ █",
-  "█ █     █ █",
-  "   ██ ██   ",
-]
-const ALIEN_W = 11
-const ALIEN_H = 8
+// Classic space invader (square pixels via half-blocks).
+const ALIEN = toHalfBlocks([
+  "....#...#....",
+  "....#...#....",
+  "...#######...",
+  "..#########..",
+  "..##.###.##..",
+  "..#########..",
+  ".###########.",
+  "##.#######.##",
+  "##.#######.##",
+  "...#.....#...",
+  "..##.....##..",
+  "..##.....##..",
+])
+const ALIEN_W = 13
+const ALIEN_H = ALIEN.length // 6
 
 // Compact alien for the sidebar fallback (shown if the overlay can't paint).
-const MINI_ALIEN = ["  ██    ██  ", "  ████████  ", " ██  ██  ██ ", " ██████████ ", "  ██    ██  "]
-
-// Pac-Man + ghost sprites (full blocks, like the alien — reliable rendering).
-const PAC_OPEN = [" ██ ", "███ ", " ██ "]
-const PAC_CLOSED = [" ██ ", "████", " ██ "]
-const PAC_COLOR = "#ffd400"
-const GHOST = [" ██ ", "████", "█ █ "]
-const GHOST_COLORS = ["#ff0000", "#ffb8ff", "#00ffff", "#ffb851"]
-
-// 5-row pixel font for the LOADING screen (3 cols per glyph).
-const FONT = {
-  L: ["█  ", "█  ", "█  ", "█  ", "███"],
-  O: ["███", "█ █", "█ █", "█ █", "███"],
-  A: ["███", "█ █", "███", "█ █", "█ █"],
-  D: ["██ ", "█ █", "█ █", "█ █", "██ "],
-  I: ["███", " █ ", " █ ", " █ ", "███"],
-  N: ["█ █", "███", "███", "█ █", "█ █"],
-  G: ["███", "█  ", "█ █", "█ █", "███"],
-  ".": ["   ", "   ", "   ", "   ", " █ "],
-  " ": ["   ", "   ", "   ", "   ", "   "],
-}
-
-function renderWord(word) {
-  const rows = ["", "", "", "", ""]
-  for (const ch of word) {
-    const g = FONT[ch] || FONT[" "]
-    for (let r = 0; r < 5; r++) rows[r] += g[r] + " "
-  }
-  return rows
-}
-
-// Build opentui nodes without JSX.
-function el(type, props) {
-  const node = createElement(type)
-  spread(node, props ?? {})
-  return node
-}
+const MINI_ALIEN = toHalfBlocks([
+  "..#.....#..",
+  "...#...#...",
+  "..#######..",
+  ".##.###.##.",
+  "###########",
+  "#.#####.#.#",
+  "...#...#...",
+])
 
 // ── Screensavers ──────────────────────────────────────────────────────────
-// Each saver: { name, stepMs, reset(w,h), tick(w,h), render(w,h) -> nodes[] }.
-// Animation area is y ∈ [3, h): the top 3 rows are reserved for the identity
-// header.
+// Each saver: { name, stepMs, reset(w,h), tick(w,h), render(w,h,color) }.
+// One color (the theme accent) is passed to render. Top 3 rows reserved for
+// the identity header.
 
 function makeAlienSaver() {
   let x = 2
   let y = 3
   let dx = 1
   let dy = 1
-  let color = 0
   const reset = (w, h) => {
     x = 2 + Math.floor(Math.random() * Math.max(1, w - ALIEN_W - 4))
-    y = 3 + Math.floor(Math.random() * Math.max(1, h - ALIEN_H - 6))
+    y = 3 + Math.floor(Math.random() * Math.max(1, h - ALIEN_H - 4))
     dx = Math.random() < 0.5 ? -1 : 1
     dy = Math.random() < 0.5 ? -1 : 1
-    color = 0
   }
   return {
     name: "alien",
@@ -107,91 +100,21 @@ function makeAlienSaver() {
     tick(w, h) {
       x += dx
       y += dy
-      let b = false
-      if (x <= 0) { x = 0; dx = 1; b = true }
-      if (x + ALIEN_W >= w) { x = w - ALIEN_W; dx = -1; b = true }
-      if (y <= 3) { y = 3; dy = 1; b = true }
-      if (y + ALIEN_H >= h) { y = h - ALIEN_H; dy = -1; b = true }
-      if (b) color = (color + 1) % SAVER_COLORS.length
+      if (x <= 0) { x = 0; dx = 1 }
+      if (x + ALIEN_W >= w) { x = w - ALIEN_W; dx = -1 }
+      if (y <= 3) { y = 3; dy = 1 }
+      if (y + ALIEN_H >= h) { y = h - ALIEN_H; dy = -1 }
     },
-    render() {
-      const c = SAVER_COLORS[color % SAVER_COLORS.length]
+    render(w, h, color) {
       return [
         el("box", {
           position: "absolute",
           left: Math.round(x),
           top: Math.round(y),
           flexDirection: "column",
-          children: ALIEN.map((ln) => el("text", { fg: c, children: ln })),
+          children: ALIEN.map((ln) => el("text", { fg: color, children: ln })),
         }),
       ]
-    },
-  }
-}
-
-function makePacmanSaver() {
-  let pacX = -4
-  let row = 5
-  let open = true
-  let items = []
-  const reset = (w, h) => {
-    pacX = -4
-    row = Math.max(3, Math.floor(h / 2) - 1)
-    open = true
-    items = []
-    for (let c = 7; c < w - 3; c += 3) {
-      items.push({ col: c, kind: "dot", color: "#9a9a9a", alive: true })
-    }
-    const spots = [0.38, 0.55, 0.72, 0.88]
-    spots.forEach((p, i) => {
-      const col = Math.floor(w * p)
-      items.push({ col, kind: "ghost", color: GHOST_COLORS[i % GHOST_COLORS.length], alive: true })
-    })
-  }
-  return {
-    name: "pacman",
-    stepMs: 140,
-    reset,
-    tick(w, h) {
-      pacX += 1
-      open = !open
-      const mouth = pacX + 3
-      for (const it of items) {
-        if (it.alive && it.col <= mouth) it.alive = false
-      }
-      if (pacX > w + 4) reset(w, h)
-    },
-    render() {
-      const nodes = []
-      for (const it of items) {
-        if (!it.alive) continue
-        if (it.kind === "dot") {
-          nodes.push(
-            el("text", { position: "absolute", left: it.col, top: row + 1, fg: it.color, children: "·" }),
-          )
-        } else {
-          nodes.push(
-            el("box", {
-              position: "absolute",
-              left: it.col,
-              top: row,
-              flexDirection: "column",
-              children: GHOST.map((ln) => el("text", { fg: it.color, children: ln })),
-            }),
-          )
-        }
-      }
-      const sprite = open ? PAC_OPEN : PAC_CLOSED
-      nodes.push(
-        el("box", {
-          position: "absolute",
-          left: Math.round(pacX),
-          top: row,
-          flexDirection: "column",
-          children: sprite.map((ln) => el("text", { fg: PAC_COLOR, children: ln })),
-        }),
-      )
-      return nodes
     },
   }
 }
@@ -199,67 +122,44 @@ function makePacmanSaver() {
 function makeProgressSaver() {
   const SEG = 12
   let pct = 0
-  let dots = 0
   let done = false
-  let blink = false
-  let ticks = 0
+  let hold = 0
   const reset = () => {
     pct = 0
-    dots = 0
     done = false
-    blink = false
-    ticks = 0
+    hold = 0
   }
   return {
     name: "progress",
-    stepMs: 140,
+    stepMs: 130,
     reset,
     tick() {
-      ticks++
-      if (ticks % 3 === 0) dots = (dots + 1) % 4
-      blink = !blink
       if (!done) {
         pct += 3
-        if (pct >= 100) { pct = 100; done = true; ticks = 0 }
-      } else if (ticks > 12) {
-        reset()
+        if (pct >= 100) { pct = 100; done = true; hold = 0 }
+      } else {
+        hold++
+        if (hold > 10) reset()
       }
     },
-    render(w, h) {
-      const WHITE = "#ffffff"
-      const GREEN = "#3bdc3b"
-      const EMPTY = "#1a1a1a"
+    render(w, h, color) {
       const filled = Math.round((pct / 100) * SEG)
-      const tail = ".".repeat(dots) + " ".repeat(3 - dots)
-      const wordRows = renderWord("LOADING" + tail).map((ln) => el("text", { fg: WHITE, children: ln }))
-      const borderW = SEG * 2 + 1
-      const segChildren = [el("text", { fg: WHITE, children: "┃ " })]
-      for (let i = 0; i < SEG; i++) {
-        segChildren.push(
-          el("text", { fg: i < filled ? GREEN : EMPTY, children: i < SEG - 1 ? "█ " : "█" }),
-        )
-      }
-      segChildren.push(el("text", { fg: WHITE, children: " ┃" }))
-      const children = [
-        ...wordRows,
-        el("box", { height: 1 }),
-        el("text", { fg: WHITE, children: "┏" + "━".repeat(borderW) + "┓" }),
-        el("box", { flexDirection: "row", children: segChildren }),
-        el("text", { fg: WHITE, children: "┗" + "━".repeat(borderW) + "┛" }),
-      ]
-      if (done) {
-        children.push(el("box", { height: 1 }))
-        children.push(el("text", { fg: blink ? "#ffd400" : "#4a4a00", children: "▸ PRESS ANY KEY" }))
-      }
+      const mid =
+        "█ " + Array.from({ length: SEG }, (_, i) => (i < filled ? "██" : "  ")).join(" ") + " █"
+      const border = "█".repeat(mid.length)
       return [
         el("box", {
           position: "absolute",
           left: 0,
-          top: Math.max(3, Math.floor(h / 2) - 5),
+          top: Math.max(3, Math.floor(h / 2) - 1),
           width: "100%",
           flexDirection: "column",
           alignItems: "center",
-          children,
+          children: [
+            el("text", { fg: color, children: border }),
+            el("text", { fg: color, children: mid }),
+            el("text", { fg: color, children: border }),
+          ],
         }),
       ]
     },
@@ -292,6 +192,13 @@ function runFadeSequence(api, target, log, flag, onDone) {
   })
 }
 
+// Build opentui nodes without JSX.
+function el(type, props) {
+  const node = createElement(type)
+  spread(node, props ?? {})
+  return node
+}
+
 const tui = async (api) => {
   try {
     mkdirSync(DIR, { recursive: true })
@@ -314,6 +221,7 @@ const tui = async (api) => {
   if (!tty || tty === "??") return {}
   const flag = `${DIR}/${tty}.flag`
   let saved = null
+  let savedAccent = BRIGHT
   let fading = false
   let lastTitle = ""
   const [isDim, setDim] = createSignal(false)
@@ -351,7 +259,7 @@ const tui = async (api) => {
   }
 
   // Screensaver controller.
-  const SAVERS = [makeAlienSaver(), makePacmanSaver(), makeProgressSaver()]
+  const SAVERS = [makeAlienSaver(), makeProgressSaver()]
   let activeSaver = null
   let saverTimer = null
 
@@ -408,10 +316,18 @@ const tui = async (api) => {
           log(`apply: theme ${DIM_THEME} not found; selected=${api.theme.selected}`)
           return
         }
+        // Capture the live theme accent BEFORE dimming, so the screensaver
+        // matches the terminal color (one color everywhere).
+        try {
+          const cur = api.theme.current || {}
+          savedAccent = cur.primary || cur.accent || cur.text || BRIGHT
+        } catch {
+          savedAccent = BRIGHT
+        }
         const current = api.theme.selected
         saved = current && current !== DIM_THEME ? current : "system"
         const ok = api.theme.set(DIM_THEME)
-        log(`apply: set dim ok=${ok} saved=${saved}`)
+        log(`apply: set dim ok=${ok} saved=${saved} accent=${savedAccent}`)
         if (ok) {
           pickSaver()
           startSaver()
@@ -495,7 +411,7 @@ const tui = async (api) => {
               animTick()
               return [
                 el("box", { height: 1 }),
-                ...MINI_ALIEN.map((line) => el("text", { fg: ACME_GREEN, children: line })),
+                ...MINI_ALIEN.map((line) => el("text", { fg: savedAccent, children: line })),
                 el("box", { height: 1 }),
                 el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
                 el("text", { fg: BRIGHT, children: "💤 idle · ⌘K → Wake Up" }),
@@ -569,10 +485,11 @@ const tui = async (api) => {
               if (!isDim()) return []
               animTick()
               const { w, h } = termSize()
+              const color = savedAccent
               let saverNodes = []
               if (activeSaver) {
                 try {
-                  saverNodes = activeSaver.render(w, h)
+                  saverNodes = activeSaver.render(w, h, color)
                 } catch (e) {
                   log(`saver render error ${e?.message || e}`)
                 }
@@ -584,8 +501,8 @@ const tui = async (api) => {
                 top: 0,
                 flexDirection: "column",
                 children: [
-                  el("text", { fg: BRIGHT, children: "▶ " + name }),
-                  el("text", { fg: "#b36b00", children: "  " + folderLabel() }),
+                  el("text", { fg: color, children: "▶ " + name }),
+                  el("text", { fg: "#8a8a8a", children: "  " + folderLabel() }),
                 ],
               })
               const hint = el("box", {
@@ -595,7 +512,7 @@ const tui = async (api) => {
                 width: "100%",
                 justifyContent: "center",
                 children: [
-                  el("text", { fg: BRIGHT, children: "💤  idle  ·  press any key or ⌘K → Wake Up" }),
+                  el("text", { fg: color, children: "💤  idle  ·  press any key or ⌘K → Wake Up" }),
                 ],
               })
               return [...saverNodes, header, hint]
