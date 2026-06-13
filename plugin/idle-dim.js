@@ -267,7 +267,7 @@ const tui = async (api) => {
                 el("box", { height: 1 }),
                 ...frame.lines.map((line) => el("text", { fg: frame.color, children: line })),
                 el("text", { fg: ctx.theme.current.textMuted, children: "─".repeat(20) }),
-                el("text", { fg: BRIGHT, children: "💤 idle · /active to wake" }),
+                el("text", { fg: BRIGHT, children: "💤 idle · /active or ⌘K → Wake Up" }),
               ]
             },
           })
@@ -297,6 +297,32 @@ const tui = async (api) => {
     log("slot session_prompt_right registered")
   } catch (e) {
     log(`session_prompt_right slot error ${e?.message || e}`)
+  }
+
+  // One-click deactivation: register a "Wake Up" command in the palette (⌘K).
+  // It runs the active script, same as typing /active.
+  try {
+    api.command.register(() => [
+      {
+        title: "Wake Up (exit idle)",
+        value: "idle-dim:wake",
+        group: "Session",
+        onSelect: () => {
+          try {
+            execSync(`${homedir()}/.local/bin/opencode-iterm-state active`, {
+              encoding: "utf8",
+              timeout: 5000,
+            })
+            log("command: wake executed via palette")
+          } catch (e) {
+            log(`command: wake error ${e?.message || e}`)
+          }
+        },
+      },
+    ])
+    log("command palette wake registered")
+  } catch (e) {
+    log(`command palette wake error ${e?.message || e}`)
   }
 
   try {
