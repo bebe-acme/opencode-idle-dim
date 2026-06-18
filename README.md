@@ -107,6 +107,9 @@ What `install.sh` does:
 | `themes/beib-dim-03/05/07.json` | `~/.config/opencode/themes/` (fade steps) |
 | `command/idle.md` | `~/.config/opencode/command/idle.md` |
 | `command/active.md` | `~/.config/opencode/command/active.md` |
+| `command/tabs-color.md` | `~/.config/opencode/command/tabs-color.md` |
+| `command/tabs-name.md` | `~/.config/opencode/command/tabs-name.md` |
+| `tab-aliases.conf.example` | `~/.config/opencode/tab-aliases.conf` (only if absent) |
 | plugin registration | merged into `~/.config/opencode/tui.json` |
 
 To apply a repo edit later: re-run `./install.sh` (or `cp -f plugin/idle-dim.js ~/.config/opencode/plugin/idle-dim.js`) and **restart OpenCode**.
@@ -119,6 +122,11 @@ Inside any OpenCode session:
 - `/active` — restore. Output: `ACTIVE_RESTORED tty=/dev/ttysNNN ...`
 - **Wake** while idle: press any key, hit `⌘K → Wake Up (exit idle)`, or run `/active`.
 
+Tab-bar coordination (operate on **all** iTerm2 tabs at once, not just the current one — handy when you run two projects per tab as splits):
+
+- `/tabs-color` — recolor every tab by state: teal if **any** pane is active, grey only when **every** pane is idle. Fixes split tabs where parking one of two panes shouldn't grey the whole tab.
+- `/tabs-name` — name every tab after its project folder(s), e.g. `DIMM:FINANCES` (both panes of a split get the combined name). Short labels come from `~/.config/opencode/tab-aliases.conf` (otherwise the folder basename). Applied via AppleScript, so it updates manually-named (locked) sessions too.
+
 From a plain shell (targets the TTY of the parent process, or set `OPENCODE_ITERM_TTY=/dev/ttysNNN` to override):
 
 ```bash
@@ -126,6 +134,8 @@ opencode-iterm-state idle      # create flag (plugin then dims + tints tab grey)
 opencode-iterm-state active    # remove flag (plugin then restores + tints tab teal)
 opencode-iterm-state locate    # find which iTerm2 window/tab/session owns the TTY
 opencode-iterm-state list      # list all iTerm2 sessions with TTYs
+opencode-iterm-state tabs-color # recolor every tab by idle/active state (teal/grey)
+opencode-iterm-state tabs-name  # name every tab after its project folder(s)
 opencode-iterm-state pid       # PID of the opencode TUI on this TTY
 opencode-iterm-state dump      # dump the session's 23 iTerm2 colors (legacy)
 opencode-iterm-state apply     # apply color lines from stdin (legacy)
@@ -157,6 +167,7 @@ opencode-iterm-state apply     # apply color lines from stdin (legacy)
 
 ```
 bin/opencode-iterm-state   bash helper: TTY detection, flag files, iTerm2 badge clear,
+                           per-tab color + name coordination (tabs-color/tabs-name),
                            AppleScript session locate/list/dump/apply utilities
 plugin/idle-dim.js         OpenCode TUI plugin: flag watcher, fade in/out, screensavers,
                            app-slot overlay, identity header, any-key + ⌘K wake
@@ -164,6 +175,9 @@ themes/beib-dim.json       the dim theme (~15% brightness, transparent backgroun
 themes/beib-dim-03/05/07   intermediate fade steps
 command/idle.md            /idle command for OpenCode
 command/active.md          /active command for OpenCode
+command/tabs-color.md      /tabs-color command (recolor all tabs by state)
+command/tabs-name.md       /tabs-name command (name all tabs after their projects)
+tab-aliases.conf.example   sample alias map for /tabs-name short labels
 acme-alien-logo.png        source ACME logo the alien sprite is rasterized from
 tui.json.example           minimal TUI config registering the plugin
 install.sh                 copies everything into place and registers the plugin

@@ -1,0 +1,16 @@
+# opencode tab aliases for the /tabs-name command.
+#
+# /tabs-name names each iTerm2 tab after its project folder(s). By default it
+# uses the folder basename; add lines here to map a project to a short label
+# so the command reproduces your own short names instead of raw basenames.
+#
+# Format (one per line):   <key>=<label>
+#   <key>    a full directory path (most specific) OR a folder basename
+#   <label>  the short name to show in the tab
+# Lines starting with # and blank lines are ignored. A full-path key wins over
+# a basename key when both match.
+#
+# Examples:
+#   opencode-idle-dim=DIMM
+#   researchs=RSRCH
+#   /Users/you/Desktop/playground/BOMBO/FINANCES=FINANCES

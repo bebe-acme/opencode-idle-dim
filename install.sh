@@ -8,6 +8,9 @@ set -euo pipefail
 #   themes/beib-dim-03/05/07.json -> ~/.config/opencode/themes/  (fade steps)
 #   command/idle.md             -> ~/.config/opencode/command/idle.md
 #   command/active.md           -> ~/.config/opencode/command/active.md
+#   command/tabs-color.md       -> ~/.config/opencode/command/tabs-color.md
+#   command/tabs-name.md        -> ~/.config/opencode/command/tabs-name.md
+#   tab-aliases.conf.example    -> ~/.config/opencode/tab-aliases.conf (if absent)
 # and registers the plugin in ~/.config/opencode/tui.json (created if missing,
 # merged if it already exists and python3 is available).
 
@@ -25,6 +28,15 @@ install -m 0644 "${REPO_DIR}/themes/beib-dim-05.json" "${OC_DIR}/themes/beib-dim
 install -m 0644 "${REPO_DIR}/themes/beib-dim-07.json" "${OC_DIR}/themes/beib-dim-07.json"
 install -m 0644 "${REPO_DIR}/command/idle.md" "${OC_DIR}/command/idle.md"
 install -m 0644 "${REPO_DIR}/command/active.md" "${OC_DIR}/command/active.md"
+install -m 0644 "${REPO_DIR}/command/tabs-color.md" "${OC_DIR}/command/tabs-color.md"
+install -m 0644 "${REPO_DIR}/command/tabs-name.md" "${OC_DIR}/command/tabs-name.md"
+
+# Optional alias map for /tabs-name — install the example only if the user has
+# no config yet, so we never clobber custom labels on reinstall.
+if [[ ! -f "${OC_DIR}/tab-aliases.conf" ]]; then
+  install -m 0644 "${REPO_DIR}/tab-aliases.conf.example" "${OC_DIR}/tab-aliases.conf"
+  echo "created ${OC_DIR}/tab-aliases.conf (edit to map folders to short tab labels)"
+fi
 
 if [[ ! -f "$TUI_JSON" ]]; then
   printf '%s\n' '{' '  "plugin": ["./plugin/idle-dim.js"]' '}' > "$TUI_JSON"

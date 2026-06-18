@@ -1,6 +1,6 @@
 # Handoff — opencode-idle-dim
 
-Fecha: 2026-06-13. Estado: **v4 (screensaver system)** instalado y commiteado. Último cambio: alien = **logo ACME rasterizado del SVG** (aspect-correct, sin deformar), **fade-in al entrar** en idle, y **despertar con cualquier tecla arreglado** (binding directo en `api.renderer.keyInput`). Verificación visual de Beib: ✅ OK (alien, fade-in y wake-con-tecla confirmados en vivo). Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
+Fecha: 2026-06-18. Estado: **v4 (screensaver system)** + **coordinación de barra de tabs**. Último cambio: dos comandos nuevos `/tabs-color` (recolorea TODOS los tabs por estado: teal si algún pane activo, gris solo si todos idle) y `/tabs-name` (nombra cada tab `proj1:proj2` por carpeta del proyecto, con alias file opcional). Antes: alien = logo ACME del SVG, fade-in al entrar, wake-con-tecla. Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
 
 ## Qué es esto
 
@@ -16,6 +16,8 @@ Mecanismo base (sin cambios desde v1): flag file por TTY (`~/.local/state/openco
 | `plugin/idle-dim.js` | `~/.config/opencode/plugin/idle-dim.js` |
 | `themes/beib-dim.json` + `beib-dim-03/05/07.json` | `~/.config/opencode/themes/` |
 | `command/idle.md` / `command/active.md` | `~/.config/opencode/command/` |
+| `command/tabs-color.md` / `command/tabs-name.md` | `~/.config/opencode/command/` |
+| `tab-aliases.conf.example` | `~/.config/opencode/tab-aliases.conf` (si no existe) |
 | `tui.json.example` | `~/.config/opencode/tui.json` |
 
 Estado runtime: flags en `~/.local/state/opencode-idle/<tty>.flag`, debug en `~/.local/state/opencode-idle/debug.log`, theme persistido en `~/.local/state/opencode/kv.json`.
@@ -41,6 +43,13 @@ Todo en `plugin/idle-dim.js` (~430 líneas). El idle fun mode es un **overlay en
 - **Fade de ENTRADA** (`runFadeInSequence`, guard `fadingIn`): al aparecer el flag pasa original → `beib-dim-07` → `-05` → `-03` → `beib-dim` (oscurece gradual, 400ms/paso). El overlay+saver **recién se muestran al llegar a `beib-dim`** (`setDim(true)` en el callback `onDim`), así se ve oscurecer antes de aparecer el screensaver. Si el flag desaparece a mitad (despertaste rápido) aborta y vuelve al theme original.
 - **Fade de DESPERTAR**: `runFadeSequence` pasa `beib-dim` → `beib-dim-03` → `-05` → `-07` → theme original, 400ms por paso (~1.6s). Cancelable: si reaparece el flag aborta y vuelve a `beib-dim`; `fading` guard evita fades duplicados; `saved` se preserva en abort.
 - **Color del tab (iTerm2)**: lo pinta el **plugin** (`paintTab`), no el bash. Escribe OSC 6 (`\033]6;1;bg;{red,green,blue};brightness;N`) directo a `/dev/<tty>` según el flag: **activa = teal `#529e99`** (`TAB_ACTIVE`, el mismo accent que el alien de idle), **idle = gris `#2b2b2b`** (`TAB_IDLE`). Se llama en `apply()` con `paintTab(idle ? "idle" : "active")` y sólo escribe en cambio de estado (`lastTabState`). Así toda sesión (incluso las que nunca corrieron `/idle`) toma el color activo al arrancar. El bash `send_idle/active_escape_codes` ya **no** toca el bg del tab (sólo limpia el badge) para no pelear con el plugin. Para cambiar colores: `TAB_ACTIVE`/`TAB_IDLE` en el plugin.
+
+### Coordinación de toda la barra (`/tabs-color`, `/tabs-name`)
+
+Dos subcomandos del bash (`opencode-iterm-state tabs-color|tabs-name`, expuestos como `/tabs-color` y `/tabs-name`) que operan sobre **todas** las sesiones de iTerm2 a la vez. Reusan el AppleScript `list`; los panes de un mismo tab salen en líneas **consecutivas** (loop window→tab→session), así que se agrupan por `(window,tab)` sin AppleScript nuevo. On-demand, no hay watcher. Pensados para el workflow de dos proyectos por tab en split. **No mueven ningún pane** (mover panes entre tabs solo lo hace la API Python de iTerm2, descartada por pesada).
+
+- **`tabs-color`**: pinta cada tab por estado — **teal si CUALQUIER pane está activo, gris solo si TODOS están idle** (lee los flags `<tty>.flag`). Resuelve el tab mixto (idle+activo) que con el `paintTab` por-sesión quedaba ambiguo. Escribe OSC 6 a cada `/dev/<tty>` del tab. Salta panes no-opencode (shells, `ssh`, `btop`) detectados por NO tener `(node)` en el nombre ni `<tty>.flag/.info` (`_is_opencode_pane`).
+- **`tabs-name`**: nombra cada tab `proj1:proj2` (basename del cwd de cada pane opencode, unidos con `:` en orden de pane; ambos panes reciben el combinado, así el tab lee bien sin importar el foco). El cwd sale por `lsof` del pid de opencode en ese TTY (`_project_label`; o de un `<tty>.info` si el plugin algún día lo publica). **Labels cortos vía `~/.config/opencode/tab-aliases.conf`** (`<path-o-basename>=<label>`, gana el match por path completo; `_alias_val` con awk); sin alias → basename. Beib eligió "basename + alias file"; el alias deja que `/tabs-name` reproduzca sus nombres lindos (ej. `opencode-idle-dim=DIMM`).
 
 ### Medios-bloques (fix del alien deforme)
 
@@ -69,6 +78,8 @@ En terminal cada char es ~2:1 (más alto que ancho), así que un sprite full-blo
 10. **El overlay `app` debe ser footprint-cero cuando NO está dim** (width/height 0, sin backgroundColor) o tapa la sesión normal. Todo por getters condicionados a `isDim()`.
 11. **Teclado**: `useKeyboard()` de @opentui/solid necesita el `RendererContext` de Solid; desde un slot getter no lo tiene y falla mudo (no despierta con tecla). Usar `api.renderer.keyInput.on("keypress", …)` directo (`api.renderer` es el `CliRenderer`). El listener NO consume el evento, así que no rompe el tipeo (trampa 2026-06-13).
 12. **`api.theme.current.*` son objetos `RGBA`, no strings.** Pasarlos a `fg` funciona; al loguearlos se ven como `rgba(0.32,…)` (sólo la stringificación). El accent del saver se captura así, antes de dimmear.
+13. **Nombre de tab: OSC 1 vs lock de iTerm.** Las sesiones nombradas a mano tienen "allow title setting" OFF y **descartan OSC 1** (escribir `\033]1;…` no cambia nada; probado en vivo). Por eso `tabs-name` usa AppleScript `set name of session`, que **sí** pega en sesiones locked. OJO: **dentro de `tell application "iTerm2"` la palabra `tab` es la clase tab de iTerm, NO el char TAB** → `offset of tab` falla mudo; hay que parsear los pares `tty\tname` **antes** del bloque `tell` usando `character id 9`. El **color** de tab (OSC 6) NO sufre el lock, así que `tabs-color` sigue por escape code (trampa 2026-06-18).
+14. **No mover panes entre tabs:** el AppleScript de iTerm2 no puede (está en mantenimiento); solo la API Python (`async_set_tabs`). Descartado por requerir habilitar la API + `pip install iterm2`. Por eso la decisión fue "color inteligente por tab", no migrar panes.
 
 ## Tests
 
@@ -81,7 +92,8 @@ Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mira
 
 ## Historia reciente (commits clave)
 
-- **(HEAD, este commit)** — **color de tab por estado**, pintado por el plugin (`paintTab`): activa = teal `#529e99` (el accent del alien de idle), idle = gris `#2b2b2b`. El bash deja de tintar el bg del tab (sólo limpia badge). Docs (README, handoff, comandos `idle`/`active`) actualizadas.
+- **(HEAD, este commit)** — **comandos `/tabs-color` y `/tabs-name`** (subcomandos `tabs-color`/`tabs-name` del bash) que coordinan toda la barra: color teal/gris por tab (any-active→teal), y nombres `proj1:proj2` por carpeta con alias file (`tab-aliases.conf`). Nombres aplicados por AppleScript (pega en sesiones con título locked, que ignoran OSC 1). Docs + install.sh + ejemplo de alias. Trampas 13/14 nuevas.
+- `e823465` — **color de tab por estado**, pintado por el plugin (`paintTab`): activa = teal `#529e99` (el accent del alien de idle), idle = gris `#2b2b2b`. El bash deja de tintar el bg del tab (sólo limpia badge). Docs (README, handoff, comandos `idle`/`active`) actualizadas.
 - `7f555ba` — docs: README reescrito para v4 (screensavers, fade-in, wake con tecla).
 - `9977b66` — alien = logo ACME rasterizado del SVG (aspect-correct vía `scalePixels`+`toHalfBlocks`), **fade-in al entrar** (`runFadeInSequence`), **fix despertar-con-tecla** (binding directo en `api.renderer.keyInput`, ya no `useKeyboard`), saca `ACME_GREEN` sin uso, agrega `.gitignore`, commitea `acme-alien-logo.png` (fuente del sprite) + `REPORTE-2026-06-12-incidente-idle.md`.
 - `f216a3d` — saca Pac-Man, alien medio-bloque (píxeles cuadrados), loading solo barra, un solo color del theme accent.
@@ -103,7 +115,9 @@ Specs/planes: `docs/superpowers/specs/2026-06-12-idle-fun-mode-design.md`, `docs
 
 - [x] ~~Verificación visual de Beib~~ — OK (alien ACME proporcionado, fade-in, despertar-con-tecla confirmados en vivo 2026-06-13).
 - [ ] Posibles savers nuevos: starfield/warp, matrix rain, acuario, snake. Mismo contrato + `toHalfBlocks` (+ `scalePixels` si querés agrandar).
-- [ ] Actualizar `README.md` (sigue describiendo el sidebar rotativo de v2, no el screensaver de v4).
+- [x] ~~Actualizar `README.md` a v4~~ — hecho (v4 + comandos de tabs documentados).
+- [ ] `tabs-name` por full-path: hoy el alias por basename puede colisionar si dos proyectos comparten basename; documentado que el match por path completo gana.
+- [ ] Que el plugin publique `<tty>.info` con el cwd, para que `tabs-name` no dependa de `lsof`.
 - [ ] Auto-idle: `api.event.on("session.status"/"session.idle")` para dimear tras N min sin actividad.
 - [ ] Opciones por `tui.json` (`["./plugin/idle-dim.js", { accent, savers, ... }]`): hoy el plugin ignora el segundo arg `options`.
 - [ ] Multi-terminal: separar lo de iTerm2 (tab tint) detrás de `TERM_PROGRAM`.

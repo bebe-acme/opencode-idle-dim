@@ -18,7 +18,7 @@ mkdir -p "$STATE_DIR"
 DIM_AMOUNT="${OPENCODE_ITERM_DIM_AMOUNT:-0.85}"
 
 usage() {
-  printf '%s\n' "usage: opencode-iterm-state idle|active|locate|list|dump|apply|pid" >&2
+  printf '%s\n' "usage: opencode-iterm-state idle|active|locate|list|dump|apply|pid|tabs-color|tabs-name" >&2
   exit 2
 }
 
@@ -390,6 +390,188 @@ restore_active() {
   printf 'ACTIVE_RESTORED tty=%s (plugin restores previous theme within ~2s)\n' "$TARGET_TTY"
 }
 
+# --- Tab coordination (smart per-tab color + auto-name) --------------------
+# These act across ALL iTerm2 sessions (not just this TTY). They read the
+# existing `list` AppleScript plus the idle flag files, then write OSC escape
+# codes to each session's /dev/<tty>. A tab's panes are consecutive lines in
+# `list` output (window->tab->session iteration), so we group on (window,tab).
+# No session is ever moved; we only set tab background color / session name.
+
+# Tab colors (keep in sync with plugin/idle-dim.js TAB_ACTIVE / TAB_IDLE).
+TAB_ACTIVE_RGB="82 158 153"   # teal  #529e99 (active: >=1 live pane in the tab)
+TAB_IDLE_RGB="43 43 43"       # grey  #2b2b2b (idle:  every pane parked)
+
+# Optional alias map for /tabs-name: lines "<full-path-or-basename>=<label>".
+# Lets /tabs-name reproduce short labels (e.g. opencode-idle-dim=DIMM) instead
+# of raw folder basenames. Missing file => plain basenames.
+TAB_ALIAS_FILE="${OPENCODE_TAB_ALIASES:-${HOME}/.config/opencode/tab-aliases.conf}"
+
+# Is this session one of ours (an opencode pane)? The iTerm Job title element
+# shows "(node)", or it already has an idle flag / info file.
+_is_opencode_pane() {
+  local name="$1" key="$2"
+  case "$name" in *"(node)"*) return 0 ;; esac
+  [[ -f "$FLAG_DIR/$key.flag" || -f "$FLAG_DIR/$key.info" ]]
+}
+
+_flush_color() {
+  local ttys="$1" any_active="$2" r g b lbl t
+  [[ -n "$ttys" ]] || return 0
+  if [[ "$any_active" -eq 1 ]]; then set -- $TAB_ACTIVE_RGB; lbl="TEAL"; else set -- $TAB_IDLE_RGB; lbl="GREY"; fi
+  r=$1; g=$2; b=$3
+  for t in $ttys; do
+    printf '\033]6;1;bg;red;brightness;%d\a\033]6;1;bg;green;brightness;%d\a\033]6;1;bg;blue;brightness;%d\a' \
+      "$r" "$g" "$b" > "/dev/$t" 2>/dev/null || true
+  done
+  printf '%s %s\n' "$lbl" "$ttys"
+}
+
+# /tabs-color: paint each tab teal if ANY pane is active, grey only if ALL idle.
+# Fixes split tabs (one idle + one active) staying teal instead of going grey.
+tabs_color() {
+  local listing prev_group="" group_ttys="" group_any_active=0
+  local line win tab tty name key group
+  listing="$(list_sessions)"
+  while IFS= read -r line; do
+    case "$line" in *window=*tty=*) ;; *) continue ;; esac
+    win=${line#*window=}; win=${win%% *}
+    tab=${line#*tab=}; tab=${tab%% *}
+    tty=${line##*tty=}
+    name=${line#*name=}; name=${name% tty=*}
+    key=${tty##*/}
+    [[ -n "$key" ]] || continue
+    group="$win:$tab"
+    if [[ "$group" != "$prev_group" ]]; then
+      _flush_color "$group_ttys" "$group_any_active"
+      group_ttys=""; group_any_active=0; prev_group="$group"
+    fi
+    if _is_opencode_pane "$name" "$key"; then
+      group_ttys="$group_ttys $key"
+      [[ -f "$FLAG_DIR/$key.flag" ]] || group_any_active=1
+    fi
+  done <<< "$listing"
+  _flush_color "$group_ttys" "$group_any_active"
+}
+
+# Look up a single key in the alias file; prints the label or nothing.
+_alias_val() {
+  [[ -f "$TAB_ALIAS_FILE" ]] || return 0
+  awk -F= -v want="$1" '
+    /^[[:space:]]*#/ { next }
+    { eq = index($0, "="); if (eq == 0) next
+      key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+      if (key == want) { print val; exit } }
+  ' "$TAB_ALIAS_FILE"
+}
+
+# Resolve a session's project label: alias file wins (full path, then basename),
+# otherwise the basename of the opencode process cwd. The cwd comes from a
+# plugin-published <tty>.info if present, else from lsof on the opencode pid.
+_project_label() {
+  local k="$1" dir="" pid="" base al
+  if [[ -f "$FLAG_DIR/$k.info" ]]; then
+    dir="$(head -1 "$FLAG_DIR/$k.info" 2>/dev/null || true)"
+  fi
+  if [[ -z "$dir" ]]; then
+    pid="$(ps -t "$k" -o pid=,command= 2>/dev/null | awk '/opencode/ && $0 !~ /iterm-state/ {print $1; exit}' || true)"
+    if [[ -n "$pid" ]]; then
+      dir="$( { lsof -a -p "$pid" -d cwd -Fn 2>/dev/null || true; } | sed -n 's/^n//p' | head -1 )"
+    fi
+  fi
+  [[ -n "$dir" ]] || return 0
+  base="$(basename "$dir")"
+  al="$(_alias_val "$dir")"
+  [[ -n "$al" ]] || al="$(_alias_val "$base")"
+  if [[ -n "$al" ]]; then printf '%s' "$al"; else printf '%s' "$base"; fi
+}
+
+# Set iTerm2 session names from "tty<TAB>name" lines read on stdin. Uses
+# AppleScript `set name` because it works even when a session's "allow title
+# setting" is OFF (manually-named sessions) \u2014 OSC 1 is silently ignored there.
+apply_names_from_lines() {
+  # Pre-parse "tty<TAB>name" pairs OUTSIDE the iTerm2 tell block: inside it the
+  # word `tab` resolves to iTerm's tab class, so we split on (character id 9).
+  osascript - "$(cat)" <<'OSA' 2>&1
+on run argv
+  set blob to item 1 of argv
+  set tabChar to (character id 9)
+  set oldD to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to linefeed
+  set theLines to text items of blob
+  set AppleScript's text item delimiters to oldD
+  set pairs to {}
+  repeat with ln in theLines
+    set lnText to ln as text
+    if lnText is not "" then
+      set AppleScript's text item delimiters to tabChar
+      set tis to text items of lnText
+      set AppleScript's text item delimiters to oldD
+      if (count of tis) is 2 then set end of pairs to {ttyV:(item 1 of tis), nameV:(item 2 of tis)}
+    end if
+  end repeat
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set stty to ""
+          try
+            set stty to tty of s
+          end try
+          if stty is not "" then
+            repeat with p in pairs
+              if (ttyV of p) is stty then set name of s to (nameV of p)
+            end repeat
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return "NAMES_APPLIED"
+end run
+OSA
+}
+
+# /tabs-name: set each tab's name to "proj1:proj2" (panes' folder basenames,
+# joined with ':' in pane order). Both panes get the combined name so the tab
+# reads it regardless of which pane is focused. Names are applied via
+# AppleScript so manually-named (locked) sessions are updated too.
+tabs_name() {
+  local listing prev_group="" group_ttys="" group_labels=""
+  local line win tab tty name key group lab blob="" t
+  listing="$(list_sessions)"
+  while IFS= read -r line; do
+    case "$line" in *window=*tty=*) ;; *) continue ;; esac
+    win=${line#*window=}; win=${win%% *}
+    tab=${line#*tab=}; tab=${tab%% *}
+    tty=${line##*tty=}
+    name=${line#*name=}; name=${name% tty=*}
+    key=${tty##*/}
+    [[ -n "$key" ]] || continue
+    group="$win:$tab"
+    if [[ "$group" != "$prev_group" ]]; then
+      if [[ -n "$group_ttys" && -n "$group_labels" ]]; then
+        for t in $group_ttys; do blob+="/dev/$t"$'\t'"$group_labels"$'\n'; done
+        printf '%s -> %s\n' "$group_ttys" "$group_labels"
+      fi
+      group_ttys=""; group_labels=""; prev_group="$group"
+    fi
+    if _is_opencode_pane "$name" "$key"; then
+      lab="$(_project_label "$key" || true)"
+      if [[ -n "$lab" ]]; then
+        group_ttys="$group_ttys $key"
+        if [[ -n "$group_labels" ]]; then group_labels="$group_labels:$lab"; else group_labels="$lab"; fi
+      fi
+    fi
+  done <<< "$listing"
+  if [[ -n "$group_ttys" && -n "$group_labels" ]]; then
+    for t in $group_ttys; do blob+="/dev/$t"$'\t'"$group_labels"$'\n'; done
+    printf '%s -> %s\n' "$group_ttys" "$group_labels"
+  fi
+  [[ -n "$blob" ]] && printf '%s' "$blob" | apply_names_from_lines >/dev/null || true
+}
+
 case "$ACTION" in
   idle) mark_idle ;;
   active) restore_active ;;
@@ -398,5 +580,7 @@ case "$ACTION" in
   dump) capture_state ;;
   apply) apply_colors_from_lines ;;
   pid) find_opencode_pid ;;
+  tabs-color) tabs_color ;;
+  tabs-name) tabs_name ;;
   *) usage ;;
 esac
