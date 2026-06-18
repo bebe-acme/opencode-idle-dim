@@ -23,6 +23,11 @@ const { createElement, spread } = otui
 
 const DIM_THEME = "beib-dim"
 const BRIGHT = "#ff9a00" // fallback accent when the theme accent can't be read
+// iTerm2 tab background tint per state (set by the plugin, see paintTab):
+// active sessions get the idle-alien teal accent, parked (idle) sessions go
+// muted dark grey — so active tabs stand out and parked ones recede.
+const TAB_ACTIVE = [82, 158, 153] // #529e99 (the idle screensaver accent)
+const TAB_IDLE = [43, 43, 43] // #2b2b2b
 const DIR = process.env.OPENCODE_IDLE_DIR || `${homedir()}/.local/state/opencode-idle`
 const FADE_THEMES = ["beib-dim-03", "beib-dim-05", "beib-dim-07"] // wake: dark -> bright
 const FADE_IN_THEMES = ["beib-dim-07", "beib-dim-05", "beib-dim-03"] // enter: bright -> dark
@@ -299,6 +304,30 @@ const tui = async (api) => {
     }
   }
 
+  // Tint THIS session's iTerm2 tab by state: active = teal, idle = grey. Writes
+  // OSC 6 (per-channel tab bg) straight to the TTY device, like the bash helper
+  // did — but driven by the plugin so every session (even never-idled ones) gets
+  // the right color, and it flips the instant the flag appears/clears. Only
+  // writes on a real state change to avoid spamming the terminal.
+  const ttyPath = tty ? `/dev/${tty}` : ""
+  let lastTabState = null
+  const paintTab = (state) => {
+    if (!ttyPath || state === lastTabState) return
+    const [r, g, b] = state === "idle" ? TAB_IDLE : TAB_ACTIVE
+    try {
+      appendFileSync(
+        ttyPath,
+        `\u001b]6;1;bg;red;brightness;${r}\u0007` +
+          `\u001b]6;1;bg;green;brightness;${g}\u0007` +
+          `\u001b]6;1;bg;blue;brightness;${b}\u0007`,
+      )
+      lastTabState = state
+      log(`tab: painted ${state} (${r},${g},${b})`)
+    } catch (e) {
+      log(`tab paint error ${e?.message || e}`)
+    }
+  }
+
   const termSize = () => {
     const r = api.renderer || {}
     const w = r.width || r.terminalWidth || r.cols || (r.terminal && r.terminal.width) || 80
@@ -370,6 +399,8 @@ const tui = async (api) => {
       const idle = existsSync(flag)
       // Bind the key handler as soon as the renderer exists (idempotent).
       ensureKeyHandler()
+      // Tab color tracks the flag: green when active, grey when parked.
+      paintTab(idle ? "idle" : "active")
       if (!api.theme.ready) {
         log("apply: theme not ready")
         return

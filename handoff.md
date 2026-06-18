@@ -40,6 +40,7 @@ Todo en `plugin/idle-dim.js` (~430 líneas). El idle fun mode es un **overlay en
 - **Otros slots**: `sidebar_title` (título naranja + captura de `lastTitle`, nunca null), `sidebar_content` (mini alien fallback, garantiza algo visible si el overlay no pinta), `session_prompt_right` (💤 al lado del prompt).
 - **Fade de ENTRADA** (`runFadeInSequence`, guard `fadingIn`): al aparecer el flag pasa original → `beib-dim-07` → `-05` → `-03` → `beib-dim` (oscurece gradual, 400ms/paso). El overlay+saver **recién se muestran al llegar a `beib-dim`** (`setDim(true)` en el callback `onDim`), así se ve oscurecer antes de aparecer el screensaver. Si el flag desaparece a mitad (despertaste rápido) aborta y vuelve al theme original.
 - **Fade de DESPERTAR**: `runFadeSequence` pasa `beib-dim` → `beib-dim-03` → `-05` → `-07` → theme original, 400ms por paso (~1.6s). Cancelable: si reaparece el flag aborta y vuelve a `beib-dim`; `fading` guard evita fades duplicados; `saved` se preserva en abort.
+- **Color del tab (iTerm2)**: lo pinta el **plugin** (`paintTab`), no el bash. Escribe OSC 6 (`\033]6;1;bg;{red,green,blue};brightness;N`) directo a `/dev/<tty>` según el flag: **activa = teal `#529e99`** (`TAB_ACTIVE`, el mismo accent que el alien de idle), **idle = gris `#2b2b2b`** (`TAB_IDLE`). Se llama en `apply()` con `paintTab(idle ? "idle" : "active")` y sólo escribe en cambio de estado (`lastTabState`). Así toda sesión (incluso las que nunca corrieron `/idle`) toma el color activo al arrancar. El bash `send_idle/active_escape_codes` ya **no** toca el bg del tab (sólo limpia el badge) para no pelear con el plugin. Para cambiar colores: `TAB_ACTIVE`/`TAB_IDLE` en el plugin.
 
 ### Medios-bloques (fix del alien deforme)
 
@@ -80,7 +81,9 @@ Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mira
 
 ## Historia reciente (commits clave)
 
-- **(HEAD, este commit)** — alien = logo ACME rasterizado del SVG (aspect-correct vía `scalePixels`+`toHalfBlocks`), **fade-in al entrar** (`runFadeInSequence`), **fix despertar-con-tecla** (binding directo en `api.renderer.keyInput`, ya no `useKeyboard`), saca `ACME_GREEN` sin uso, agrega `.gitignore`, commitea `acme-alien-logo.png` (fuente del sprite) + `REPORTE-2026-06-12-incidente-idle.md`.
+- **(HEAD, este commit)** — **color de tab por estado**, pintado por el plugin (`paintTab`): activa = teal `#529e99` (el accent del alien de idle), idle = gris `#2b2b2b`. El bash deja de tintar el bg del tab (sólo limpia badge). Docs (README, handoff, comandos `idle`/`active`) actualizadas.
+- `7f555ba` — docs: README reescrito para v4 (screensavers, fade-in, wake con tecla).
+- `9977b66` — alien = logo ACME rasterizado del SVG (aspect-correct vía `scalePixels`+`toHalfBlocks`), **fade-in al entrar** (`runFadeInSequence`), **fix despertar-con-tecla** (binding directo en `api.renderer.keyInput`, ya no `useKeyboard`), saca `ACME_GREEN` sin uso, agrega `.gitignore`, commitea `acme-alien-logo.png` (fuente del sprite) + `REPORTE-2026-06-12-incidente-idle.md`.
 - `f216a3d` — saca Pac-Man, alien medio-bloque (píxeles cuadrados), loading solo barra, un solo color del theme accent.
 - `6978234` — sistema de savers pluggables (random por /idle): alien chico, Pac-Man con fantasmas, barra LOADING 8-bit + header de identidad.
 - `a2e29a9` — screensaver DVD-bounce fullscreen vía slot `app` (sin rutas), dismiss con cualquier tecla.

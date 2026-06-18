@@ -14,7 +14,7 @@ How it works:
 - The script finds the TTY of the parent `opencode` process (never the frontmost iTerm2 window) and creates a flag file in `~/.local/state/opencode-idle/<tty>.flag`.
 - The `idle-dim` TUI plugin in this opencode instance detects the flag within ~2s, fades the theme down to `beib-dim` (everything ~85% darker, uniform dim), and shows a full-screen screensaver (a bouncing ACME alien or an 8-bit loading bar) with the project name/folder on top. The dim persists regardless of focus until woken.
 - Wake with any key, `⌘K → Wake Up`, or `/active` (fades back to your theme).
-- It also marks the iTerm2 tab with a light color so it is identifiable in the tab bar.
+- The plugin tints this iTerm2 tab grey while parked (active sessions show a teal tab) so you can spot it in the tab bar.
 - Running it twice is safe (prints IDLE_ALREADY).
 - If the dim does not appear, this opencode instance probably started before the plugin was installed; a restart of opencode is needed once.
 

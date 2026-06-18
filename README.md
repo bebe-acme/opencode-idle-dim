@@ -2,7 +2,7 @@
 
 Visually park OpenCode sessions in iTerm2 without closing them — with a full-screen retro **screensaver**.
 
-Run `/idle` inside any OpenCode session and the whole TUI fades down to ~15% brightness, then a randomly-picked screensaver takes over the screen (a bouncing **ACME alien** DVD-style, or an 8-bit **loading bar**). A persistent identity header (project name + folder) stays on top so you always know which parked session you are looking at. The iTerm2 tab also gets a light color marker. Press **any key**, hit **⌘K → Wake Up**, or run **`/active`** and the screen fades back to your original theme. The dim is persistent (independent of window focus) and survives until you explicitly wake it.
+Run `/idle` inside any OpenCode session and the whole TUI fades down to ~15% brightness, then a randomly-picked screensaver takes over the screen (a bouncing **ACME alien** DVD-style, or an 8-bit **loading bar**). A persistent identity header (project name + folder) stays on top so you always know which parked session you are looking at. The iTerm2 **tab itself is tinted by state** — teal while active, grey while parked — so the whole tab bar reads at a glance. Press **any key**, hit **⌘K → Wake Up**, or run **`/active`** and the screen fades back to your original theme. The dim is persistent (independent of window focus) and survives until you explicitly wake it.
 
 Built for the workflow of running many OpenCode sessions in parallel in iTerm2 tabs/splits and needing an at-a-glance signal of which ones are parked.
 
@@ -49,7 +49,7 @@ No daemons, no signals. Three cooperating pieces talking through a flag file:
        ├─ finds the parent opencode TTY by walking the process tree
        │  (never targets the frontmost iTerm2 window: that is unsafe)
        ├─ creates a flag file  ~/.local/state/opencode-idle/<tty>.flag
-       └─ sends iTerm2 escape codes to tint the tab
+       └─ clears the iTerm2 tab badge (tab *color* is owned by the plugin)
 
 plugin/idle-dim.js (OpenCode TUI plugin, runs inside each instance)
   ├─ detects its own TTY (ps -o tty= -p $$)
@@ -58,6 +58,7 @@ plugin/idle-dim.js (OpenCode TUI plugin, runs inside each instance)
   ├─ flag removed  -> hide overlay, FADE OUT to the saved theme
   ├─ self-heals: if it starts on beib-dim with no flag, returns to "system"
   ├─ renders the screensaver in the `app` slot overlay (NOT a route)
+  ├─ tints the iTerm2 tab via OSC 6: teal when active, grey when parked
   ├─ keeps the sidebar_title readable (orange while dimmed)
   └─ binds any-key wake on api.renderer.keyInput + a ⌘K "Wake Up" command
 
@@ -72,6 +73,7 @@ Why a theme switch instead of remapping terminal colors? OpenCode renders most o
 
 - **Overlay via the `app` slot, never `api.route`.** Plugin routes render *without* the prompt, so navigating to a full-screen idle route locks you out of typing `/active` — the session looks dead (this bricked 8 TTYs once; see `REPORTE-2026-06-12-incidente-idle.md`). The `app` slot draws on top while the prompt stays alive underneath. The overlay is footprint-zero (size 0, no background) whenever not dimmed. The test enforces a hard **zero-`api.route`** invariant.
 - **Any-key wake via `api.renderer.keyInput`.** `@opentui/solid`'s `useKeyboard()` needs the Solid `RendererContext` and silently no-ops from a slot getter, so it's bound directly on `api.renderer.keyInput.on("keypress", …)` (`api.renderer` is the `CliRenderer`). The listener only wakes while dimmed and never consumes the event, so typing is unaffected.
+- **Tab color owned by the plugin, not the bash helper.** The plugin runs in every session and knows the live state, so it paints the tab (OSC 6 to the TTY) on every transition — active sessions get the teal accent, parked ones go grey. The bash helper no longer sets tab background (only clears the badge), which avoids two writers fighting and means even never-idled sessions get the active color automatically.
 - **Square pixels via half-blocks.** Terminal cells are ~2:1 (taller than wide), so full-block sprites look stretched. `toHalfBlocks` packs two vertical pixels per character; `scalePixels` enlarges by integer factors. The ACME alien keeps its exact 10:7 aspect.
 - **One color, from the theme accent.** `api.theme.current.*` are `RGBA` objects (they only stringify as `rgba(0.32,…)` when logged); the accent is captured before dimming and passed to every saver.
 - **TTY targeting, not frontmost window.** OpenCode's tool shell has no `/dev/tty`; the script walks up the process tree to find the first ancestor with a real TTY, so `/idle` always hits the session that ran it.
@@ -120,8 +122,8 @@ Inside any OpenCode session:
 From a plain shell (targets the TTY of the parent process, or set `OPENCODE_ITERM_TTY=/dev/ttysNNN` to override):
 
 ```bash
-opencode-iterm-state idle      # create flag + tint tab
-opencode-iterm-state active    # remove flag + reset tab
+opencode-iterm-state idle      # create flag (plugin then dims + tints tab grey)
+opencode-iterm-state active    # remove flag (plugin then restores + tints tab teal)
 opencode-iterm-state locate    # find which iTerm2 window/tab/session owns the TTY
 opencode-iterm-state list      # list all iTerm2 sessions with TTYs
 opencode-iterm-state pid       # PID of the opencode TUI on this TTY
@@ -138,7 +140,7 @@ opencode-iterm-state apply     # apply color lines from stdin (legacy)
 - **Accent color:** captured from the theme; the `BRIGHT` constant (`#ff9a00`) is the fallback and the dimmed sidebar title color.
 - **Fade:** `FADE_IN_THEMES` / `FADE_THEMES` (order) and `FADE_STEP_MS` (default 400ms per step).
 - **Dim strength:** regenerate `themes/beib-dim.json` with a different multiplier (current ~0.15 of each role) and reinstall.
-- **Tab tint:** brightness values in `send_idle_escape_codes` in `bin/opencode-iterm-state` (default 245, near-white).
+- **Tab tint:** `TAB_ACTIVE` / `TAB_IDLE` RGB constants in `plugin/idle-dim.js` (defaults: teal `#529e99` active, grey `#2b2b2b` idle). The plugin writes OSC 6 to the session's TTY on each state change.
 - **Dim theme name:** `DIM_THEME` in the plugin must match the theme filename.
 - **Overrides:** `OPENCODE_IDLE_DIR` (flag/log dir) and `OPENCODE_IDLE_TTY` / `OPENCODE_ITERM_TTY` (force a TTY).
 
@@ -154,7 +156,7 @@ opencode-iterm-state apply     # apply color lines from stdin (legacy)
 ## Repo layout
 
 ```
-bin/opencode-iterm-state   bash helper: TTY detection, flag files, iTerm2 tab marker,
+bin/opencode-iterm-state   bash helper: TTY detection, flag files, iTerm2 badge clear,
                            AppleScript session locate/list/dump/apply utilities
 plugin/idle-dim.js         OpenCode TUI plugin: flag watcher, fade in/out, screensavers,
                            app-slot overlay, identity header, any-key + ⌘K wake
