@@ -1,12 +1,14 @@
 # Handoff — opencode-idle-dim
 
-Fecha: 2026-06-18. Estado: **v4 (screensaver system)** + **coordinación de barra de tabs**. Último cambio: dos comandos nuevos `/tabs-color` (recolorea TODOS los tabs por estado: teal si algún pane activo, gris solo si todos idle) y `/tabs-name` (nombra cada tab `proj1:proj2` por carpeta del proyecto, con alias file opcional). Antes: alien = logo ACME del SVG, fade-in al entrar, wake-con-tecla. Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
+Fecha: 2026-06-19. Estado: **v5 — dim estático (screensaver ELIMINADO por calor)** + coordinación de barra de tabs. Último cambio: se sacó TODO el screensaver/animación/overlay/fade/any-key del plugin; `/idle` ahora es un único `api.theme.set("beib-dim")` + tint de tab gris (cero timers, ~0% CPU mientras está parkeada). Antes (v4): overlay a pantalla completa con alien ACME rebotando / barra 8-bit, fade de 4 pasos, despertar-con-tecla. Este repo es el espejo canónico; las copias instaladas en el sistema son las que OpenCode usa en runtime.
 
 ## Qué es esto
 
-`/idle` dentro de una sesión de OpenCode dimmea toda la TUI (theme `beib-dim`, ~15% de brillo, uniforme) y muestra un **screensaver a pantalla completa** elegido al azar. `/active` restaura con un fade de 4 pasos. Persistente e independiente del foco. Pensado para tener muchas sesiones de OpenCode en tabs/splits de iTerm2 y ver de un vistazo cuáles están parkeadas.
+`/idle` dentro de una sesión de OpenCode dimmea toda la TUI (theme `beib-dim`, ~15% de brillo, uniforme, switch **instantáneo** sin fade), pinta el tab de iTerm2 **gris**, pone el título del sidebar naranja y un `💤` al lado del prompt. `/active` (o ⌘K → Wake Up) restaura el theme guardado y el tab teal. Persistente e independiente del foco. **Mientras está parkeada NO corre ningún timer ni re-render** — ese es el punto de v5.
 
-Mecanismo base (sin cambios desde v1): flag file por TTY (`~/.local/state/opencode-idle/<tty>.flag`) + plugin TUI que cambia el theme y pinta el overlay. Sin daemons, sin señales.
+Mecanismo base (sin cambios desde v1): flag file por TTY (`~/.local/state/opencode-idle/<tty>.flag`) + plugin TUI que cambia el theme. Sin daemons, sin señales.
+
+**Por qué se sacó el screensaver:** con ~11 sesiones parkeadas, el `setInterval` de animación (alien stepMs=110, progress stepMs=130) hacía que cada instancia de OpenCode re-renderizara el overlay + iTerm2/WindowServer redibujaran sin parar → 13-27% CPU por sesión dimmeada + ~115% iTerm2/WindowServer, sumando varios cores de calor con NADA trabajando. El dim por theme switch logra el objetivo (ver de un vistazo qué está parkeado) a costo cero. (Ver `docs/orchestrator-review.md` para el camino futuro del indicador activo/idle.)
 
 ## Dónde vive lo instalado (fuente de verdad en runtime)
 
@@ -14,7 +16,8 @@ Mecanismo base (sin cambios desde v1): flag file por TTY (`~/.local/state/openco
 | --- | --- |
 | `bin/opencode-iterm-state` | `~/.local/bin/opencode-iterm-state` |
 | `plugin/idle-dim.js` | `~/.config/opencode/plugin/idle-dim.js` |
-| `themes/beib-dim.json` + `beib-dim-03/05/07.json` | `~/.config/opencode/themes/` |
+| `themes/beib-dim.json` | `~/.config/opencode/themes/beib-dim.json` |
+| `themes/beib-dim-03/05/07.json` | `~/.config/opencode/themes/` (del fade viejo, **hoy sin uso**) |
 | `command/idle.md` / `command/active.md` | `~/.config/opencode/command/` |
 | `command/tabs-color.md` / `command/tabs-name.md` | `~/.config/opencode/command/` |
 | `tab-aliases.conf.example` | `~/.config/opencode/tab-aliases.conf` (si no existe) |
@@ -24,105 +27,93 @@ Estado runtime: flags en `~/.local/state/opencode-idle/<tty>.flag`, debug en `~/
 
 **Workflow de edición:** editar en el repo → `cp -f plugin/idle-dim.js ~/.config/opencode/plugin/idle-dim.js` (o `./install.sh` para todo) → **reiniciar OpenCode** (el plugin se carga al arrancar; una instancia vieja sigue con el plugin viejo en memoria). Siempre commitear el cambio en el repo.
 
-## Arquitectura actual (v4)
+## Arquitectura actual (v5)
 
-Todo en `plugin/idle-dim.js` (~430 líneas). El idle fun mode es un **overlay en el slot `app`**, NO en el sidebar y NO en rutas.
+Todo en `plugin/idle-dim.js` (~218 líneas; era ~666 en v4). Sin savers, sin overlay (`app` slot eliminado), sin fade, sin keyhandler. Un solo signal `isDim` para el color del título y el `💤`.
 
-- **Slot `app`**: OpenCode lo renderiza por encima de toda la app, después del route activo, SIN reemplazar el prompt. Devolvemos un `box` absoluto a pantalla completa (zIndex 9999, fondo negro) **solo cuando `isDim()`**; cuando no, tamaño 0 / sin fondo (footprint cero). Reactividad por getters en props (`get position()`, `get children()`, etc.) que leen los signals `isDim` y `animTick`.
-- **Savers pluggables**: `SAVERS = [makeAlienSaver(), makeProgressSaver()]`. `pickSaver()` elige uno **al azar en cada `/idle`**. Contrato de cada saver:
-  ```js
-  { name, stepMs, reset(w,h), tick(w,h), render(w,h,color) -> nodes[] }
-  ```
-  `startSaver()` corre un `setInterval(activeSaver.stepMs)` que llama `tick(w,h)` y hace `bumpAnim` (un signal que dispara el re-render del getter). `stopSaver()` limpia. Todos los timers con `.unref?.()`.
-- **Saver 1 — alien (DVD bounce)**: `makeAlienSaver`. El **logo ACME** rasterizado del SVG (ver abajo) que rebota por la pantalla (rebota en bordes, área `y ∈ [3,h)`). Grilla nativa 10×7 px, escalada 2× con `scalePixels` y dibujada con **medios-bloques** → 20 cols × 7 filas, aspect ratio 10:7 exacto.
-- **Saver 2 — progress (loading 8-bit)**: `makeProgressSaver`. SOLO una barra pixelada: frame de bloques `█` + 12 segmentos chunky de 2 anchos que se llenan y loopean (sube `pct`, al 100% hold ~1.3s y reset). Sin la palabra "LOADING" (Beib la sacó: quedaba enorme).
-- **Un solo color**: `savedAccent` se captura del theme activo **antes** de dimmear, en `apply()`: `api.theme.current.primary || .accent || .text || BRIGHT`. Se pasa a `render(w,h,color)` y se usa en alien, barra, header y hint. Si la terminal de Beib es naranja, todo sale naranja. (Antes el alien hacía color-flip arcoíris en cada rebote; se eliminó por pedido.)
-- **Header de identidad (CRÍTICO)**: como el overlay tapa el `sidebar_title`, el overlay dibuja arriba-izquierda (rendered last, encima del saver) dos líneas: `▶ <nombre>` (color accent) + la carpeta (gris `#8a8a8a`). El nombre se captura del slot `sidebar_title` (`props.title → lastTitle`); la carpeta de `api.state.path.directory || worktree || process.cwd()`, abreviada con `~`. Los 3 primeros renglones quedan reservados para que el saver no lo tape.
-- **Dismiss**: cualquier tecla, vía binding directo `api.renderer.keyInput.on("keypress", …)` en `ensureKeyHandler()` (idempotente, re-intentado en cada render del slot hasta que el renderer exista) + comando ⌘K "Wake Up (exit idle)" (`api.command.register`, deprecado pero funcional) + `/active`. Los tres corren `wakeUp()` que ejecuta `opencode-iterm-state active`. **No usar `useKeyboard()` de @opentui/solid desde un slot**: necesita el `RendererContext` de Solid y falla silenciosamente (así estuvo roto el wake-con-tecla). `api.renderer` ES el `CliRenderer` (confirmado en `@opencode-ai/plugin` tui.d.ts).
-- **Otros slots**: `sidebar_title` (título naranja + captura de `lastTitle`, nunca null), `sidebar_content` (mini alien fallback, garantiza algo visible si el overlay no pinta), `session_prompt_right` (💤 al lado del prompt).
-- **Fade de ENTRADA** (`runFadeInSequence`, guard `fadingIn`): al aparecer el flag pasa original → `beib-dim-07` → `-05` → `-03` → `beib-dim` (oscurece gradual, 400ms/paso). El overlay+saver **recién se muestran al llegar a `beib-dim`** (`setDim(true)` en el callback `onDim`), así se ve oscurecer antes de aparecer el screensaver. Si el flag desaparece a mitad (despertaste rápido) aborta y vuelve al theme original.
-- **Fade de DESPERTAR**: `runFadeSequence` pasa `beib-dim` → `beib-dim-03` → `-05` → `-07` → theme original, 400ms por paso (~1.6s). Cancelable: si reaparece el flag aborta y vuelve a `beib-dim`; `fading` guard evita fades duplicados; `saved` se preserva en abort.
-- **Color del tab (iTerm2)**: lo pinta el **plugin** (`paintTab`), no el bash. Escribe OSC 6 (`\033]6;1;bg;{red,green,blue};brightness;N`) directo a `/dev/<tty>` según el flag: **activa = teal `#529e99`** (`TAB_ACTIVE`, el mismo accent que el alien de idle), **idle = gris `#2b2b2b`** (`TAB_IDLE`). Se llama en `apply()` con `paintTab(idle ? "idle" : "active")` y sólo escribe en cambio de estado (`lastTabState`). Así toda sesión (incluso las que nunca corrieron `/idle`) toma el color activo al arrancar. El bash `send_idle/active_escape_codes` ya **no** toca el bg del tab (sólo limpia el badge) para no pelear con el plugin. Para cambiar colores: `TAB_ACTIVE`/`TAB_IDLE` en el plugin.
+- **`apply()`** (la máquina de estados, disparada por el flag):
+  - lee `idle = existsSync(flag)`, llama `paintTab(idle ? "idle" : "active")`.
+  - si `idle && saved === null` (ENTRAR): guarda `saved = api.theme.selected` (o `"system"`), `api.theme.set("beib-dim")`, `setDim(true)`. **Instantáneo, sin fade.**
+  - si `!idle && saved !== null` (SALIR): `api.theme.set(saved)`, `saved = null`, `setDim(false)`.
+  - si `!idle && api.theme.selected === "beib-dim"` (SELF-HEAL): `api.theme.set("system")` (quedó el theme dim persistido sin flag, ej. crash).
+- **Slots** (los únicos que quedan):
+  - `sidebar_title`: naranja (`BRIGHT=#ff9a00`) cuando `isDim()`, si no `ctx.theme.current.text`. **Nunca null** (es `single_winner`). Color por getter reactivo.
+  - `session_prompt_right`: `💤` cuando `isDim()`, si no `""`. Estático.
+- **`paintTab(state)`**: OSC 6 (`\033]6;1;bg;{red,green,blue};brightness;N`) directo a `/dev/<tty>`. **activa = teal `#529e99`** (`TAB_ACTIVE`), **idle = gris `#2b2b2b`** (`TAB_IDLE`). Sólo escribe en cambio de estado (`lastTabState`). Así toda sesión (incluso las que nunca corrieron `/idle`) toma el color activo al arrancar. El bash `send_idle/active_escape_codes` ya **no** toca el bg del tab (sólo limpia el badge).
+- **Wake**: `/active` (saca el flag) o comando ⌘K "Wake Up" (`api.command.register` → `wakeUp()` corre `opencode-iterm-state active`). Ya **no** hay despertar-con-tecla (no hace falta: el prompt está vivo, podés tipear directamente; sin overlay nada "tapa" la sesión).
+- **Watcher**: `fs.watch(DIR, …)` reacciona al instante; `setInterval(apply, 5000)` es sólo fallback/self-heal (era 1.5s en v4). Ambos `.unref?.()`.
+- **Constantes** (arriba del archivo): `DIM_THEME="beib-dim"`, `BRIGHT="#ff9a00"`, `TAB_ACTIVE=[82,158,153]`, `TAB_IDLE=[43,43,43]`, `DIR`.
 
 ### Coordinación de toda la barra (`/tabs-color`, `/tabs-name`)
 
-Dos subcomandos del bash (`opencode-iterm-state tabs-color|tabs-name`, expuestos como `/tabs-color` y `/tabs-name`) que operan sobre **todas** las sesiones de iTerm2 a la vez. Reusan el AppleScript `list`; los panes de un mismo tab salen en líneas **consecutivas** (loop window→tab→session), así que se agrupan por `(window,tab)` sin AppleScript nuevo. On-demand, no hay watcher. Pensados para el workflow de dos proyectos por tab en split. **No mueven ningún pane** (mover panes entre tabs solo lo hace la API Python de iTerm2, descartada por pesada).
+Dos subcomandos del bash (`opencode-iterm-state tabs-color|tabs-name`, expuestos como `/tabs-color` y `/tabs-name`) que operan sobre **todas** las sesiones de iTerm2 a la vez. Reusan el AppleScript `list`; los panes de un mismo tab salen en líneas **consecutivas** (loop window→tab→session), así que se agrupan por `(window,tab)` sin AppleScript nuevo. On-demand, no hay watcher. **No mueven ningún pane** (mover panes entre tabs solo lo hace la API Python de iTerm2, descartada por pesada).
 
 - **`tabs-color`**: pinta cada tab por estado — **teal si CUALQUIER pane está activo, gris solo si TODOS están idle** (lee los flags `<tty>.flag`). Resuelve el tab mixto (idle+activo) que con el `paintTab` por-sesión quedaba ambiguo. Escribe OSC 6 a cada `/dev/<tty>` del tab. Salta panes no-opencode (shells, `ssh`, `btop`) detectados por NO tener `(node)` en el nombre ni `<tty>.flag/.info` (`_is_opencode_pane`).
-- **`tabs-name`**: nombra cada tab `proj1:proj2` (basename del cwd de cada pane opencode, unidos con `:` en orden de pane; ambos panes reciben el combinado, así el tab lee bien sin importar el foco). El cwd sale por `lsof` del pid de opencode en ese TTY (`_project_label`; o de un `<tty>.info` si el plugin algún día lo publica). **Labels cortos vía `~/.config/opencode/tab-aliases.conf`** (`<path-o-basename>=<label>`, gana el match por path completo; `_alias_val` con awk); sin alias → basename. Beib eligió "basename + alias file"; el alias deja que `/tabs-name` reproduzca sus nombres lindos (ej. `opencode-idle-dim=DIMM`).
+- **`tabs-name`**: nombra cada tab `proj1:proj2` (basename del cwd de cada pane opencode, unidos con `:`; ambos panes reciben el combinado). El cwd sale por `lsof` del pid de opencode (`_project_label`; o de un `<tty>.info` si el plugin algún día lo publica). **Labels cortos vía `~/.config/opencode/tab-aliases.conf`** (`<path-o-basename>=<label>`, gana el match por path completo; `_alias_val` con awk); sin alias → basename. Beib eligió "basename + alias file" (ej. `opencode-idle-dim=DIMM`).
 
-### Medios-bloques (fix del alien deforme)
+## Contexto del cambio v5 (fix de calor, 2026-06-19)
 
-En terminal cada char es ~2:1 (más alto que ancho), así que un sprite full-block se ve **estirado**. Solución: `toHalfBlocks(rows)` toma una grilla de píxeles (strings, `#`=lleno) y combina cada par de filas en una fila de chars usando `▀▄█` → píxeles cuadrados. `scalePixels(rows, sx, sy)` agranda la grilla por factores enteros sin deformar (para hacer el sprite más grande manteniendo aspect ratio). **Para cualquier sprite nuevo, usar este patrón.**
+El gatillo fue calor/CPU alto sin nada trabajando (load 12-15, cores 76-90°C en un M5 Pro). Diagnóstico: (a) **3 MCP `@aaronsb/google-workspace-mcp` huérfanos** (PPID=1, sus opencode murieron) quemando ~3 cores; (b) el screensaver en ~11 sesiones parkeadas; (c) Chrome aparte; (d) presión de memoria (swap 96%). Se hicieron 3 tracks; **sólo el Track 2 (sacar el screensaver) toca este repo**. Los otros dos son sistema (fuera del repo):
 
-**El alien ACME** (`ACME_PIXELS`) se rasterizó directo del SVG (`acme-alien-logo.png`/SVG, viewBox 362.78×259.62 sobre grilla de 30.71u → 10 cols × 7 filas de píxeles; cada celda del logo = 1 `#`). Se escala `scalePixels(ACME_PIXELS, 2, 2)` → 20×14 px → `toHalfBlocks` → 20 cols × 7 char-rows, aspect 10:7 exacto. El `MINI_ALIEN` (sidebar) usa el mismo `ACME_PIXELS` a tamaño nativo. **Si rehacés el sprite, editá `ACME_PIXELS` (es la fuente) y previsualizá con un script node antes de embeber.**
-
-## Cómo agregar un saver nuevo
-
-1. Escribir `makeXSaver()` que devuelva `{ name, stepMs, reset(w,h), tick(w,h), render(w,h,color) }`. `render` devuelve nodos `el(...)` posicionados absolutos; usar `color` (el accent) para un solo color; reservar `y ∈ [3,h)`.
-2. Agregarlo a `SAVERS`.
-3. Para sprites, definir grilla de píxeles + `toHalfBlocks`. Previsualizar con un script node en `/tmp` antes de embeber (así se hizo el alien y la barra).
-4. `node --check`, correr el test, `cp` a runtime, reiniciar OpenCode, probar.
+- **Track 1 (sistema):** reorganización de MCP google-workspace de global → por proyecto (en `~/.config/opencode/opencode.jsonc` + `opencode.json` de cada proyecto), backup en `opencode.jsonc.bak-20260619-mcp-reorg`. Reaper de huérfanos: `~/.config/opencode/bin/reap-orphan-mcp.sh` + LaunchAgent `~/Library/LaunchAgents/com.beib.reap-orphan-mcp.plist` (cada 10 min, mata procs MCP con PPID==1 y sus descendientes). OJO: el google-workspace-mcp corre en DOS niveles (wrapper `npm exec` + hijo `node` caliente); matar sólo el PPID==1 deja vivo al hijo (reparenta a launchd) → hay que matar el subárbol.
+- **Track 3 (este repo):** `docs/orchestrator-review.md` — review de orquestadores/indicadores activo-idle compatibles con OpenCode (Beib no quiere seguir customizando iTerm2 a mano).
 
 ## Trampas conocidas (no re-descubrir)
 
-1. **No usar SIGUSR2** para refrescar el theme: aborta tool calls en vuelo. Se usa watcher + poll de 1.5s.
+1. **No usar SIGUSR2** para refrescar el theme: aborta tool calls en vuelo. Se usa watcher + poll (5s).
 2. **No dimear vía paleta ANSI/AppleScript:** OpenCode usa truecolor derivado del background; los blancos/paneles quedan brillantes. Por eso se cambia el theme entero.
 3. **`sidebar_title` es `single_winner` y fija el fallback en el render inicial:** nunca devolver null; cambiar solo el color por getter reactivo.
 4. **Plugins TUI van en `tui.json`, no en `opencode.jsonc`.**
 5. iTerm2 bloquea `SetProfile` por escape code y devuelve colores de 3 componentes por AppleScript; el legacy `dump`/`apply` lo maneja.
 6. Detección de TTY camina el árbol de procesos (el shell de tools no tiene `/dev/tty`). Override: `OPENCODE_ITERM_TTY`.
-7. **NUNCA usar `api.route.register`/`navigate` para la pantalla idle.** Las rutas de plugin renderizan SIN el prompt → el usuario queda sin poder tipear `/active` (sesión "muerta"). Brickeó 8 TTYs el 2026-06-12 (ver `REPORTE-2026-06-12-incidente-idle.md`). **La solución correcta es el slot `app`** (overlay encima, prompt sigue vivo abajo). El test fija el invariante: cero `api.route`.
-8. **Reactividad en slots por getters en props** (`get fg()`, `get children()`), no por re-ejecutar la función del slot. El saver hace bump de `animTick` y los getters lo leen.
-9. **Aspect ratio:** sprites full-block se ven estirados; usar `toHalfBlocks` (trampa 2026-06-13).
-10. **El overlay `app` debe ser footprint-cero cuando NO está dim** (width/height 0, sin backgroundColor) o tapa la sesión normal. Todo por getters condicionados a `isDim()`.
-11. **Teclado**: `useKeyboard()` de @opentui/solid necesita el `RendererContext` de Solid; desde un slot getter no lo tiene y falla mudo (no despierta con tecla). Usar `api.renderer.keyInput.on("keypress", …)` directo (`api.renderer` es el `CliRenderer`). El listener NO consume el evento, así que no rompe el tipeo (trampa 2026-06-13).
-12. **`api.theme.current.*` son objetos `RGBA`, no strings.** Pasarlos a `fg` funciona; al loguearlos se ven como `rgba(0.32,…)` (sólo la stringificación). El accent del saver se captura así, antes de dimmear.
-13. **Nombre de tab: OSC 1 vs lock de iTerm.** Las sesiones nombradas a mano tienen "allow title setting" OFF y **descartan OSC 1** (escribir `\033]1;…` no cambia nada; probado en vivo). Por eso `tabs-name` usa AppleScript `set name of session`, que **sí** pega en sesiones locked. OJO: **dentro de `tell application "iTerm2"` la palabra `tab` es la clase tab de iTerm, NO el char TAB** → `offset of tab` falla mudo; hay que parsear los pares `tty\tname` **antes** del bloque `tell` usando `character id 9`. El **color** de tab (OSC 6) NO sufre el lock, así que `tabs-color` sigue por escape code (trampa 2026-06-18).
-14. **No mover panes entre tabs:** el AppleScript de iTerm2 no puede (está en mantenimiento); solo la API Python (`async_set_tabs`). Descartado por requerir habilitar la API + `pip install iterm2`. Por eso la decisión fue "color inteligente por tab", no migrar panes.
+7. **NUNCA usar `api.route.register`/`navigate` para la pantalla idle.** Las rutas de plugin renderizan SIN el prompt → el usuario queda sin poder tipear `/active` (sesión "muerta"). Brickeó 8 TTYs el 2026-06-12 (ver `REPORTE-2026-06-12-incidente-idle.md`). El test fija el invariante: **cero `api.route`**. (En v4 esto se resolvía con el slot `app`; en v5 ni siquiera hay overlay, pero el invariante se mantiene.)
+8. **Reactividad en slots por getters en props** (`get fg()`, `get children()`), no por re-ejecutar la función del slot. (En v5 sólo lo usan `sidebar_title` y `session_prompt_right`.)
+9. **`api.theme.current.*` son objetos `RGBA`, no strings.** Pasarlos a `fg` funciona; al loguearlos se ven como `rgba(0.32,…)`.
+10. **Nombre de tab: OSC 1 vs lock de iTerm.** Las sesiones nombradas a mano tienen "allow title setting" OFF y **descartan OSC 1** (probado en vivo). Por eso `tabs-name` usa AppleScript `set name of session`, que **sí** pega en sesiones locked. OJO: **dentro de `tell application "iTerm2"` la palabra `tab` es la clase tab de iTerm, NO el char TAB** → `offset of tab` falla mudo; parsear los pares `tty\tname` **antes** del bloque `tell` con `character id 9`. El **color** de tab (OSC 6) NO sufre el lock.
+11. **No mover panes entre tabs:** el AppleScript de iTerm2 no puede (mantenimiento); solo la API Python (`async_set_tabs`). Descartado por requerir habilitar la API + `pip install iterm2`. Por eso "color inteligente por tab", no migrar panes.
+12. **MCP google-workspace huérfano de dos niveles:** matar sólo el wrapper PPID==1 deja el hijo `node` caliente vivo (reparenta a launchd). Matar el subárbol completo. El reaper (Track 1) ya lo hace.
+13. **(Histórico, v4)** El overlay vivía en el slot `app` (encima del prompt, footprint cero cuando no dim); el despertar-con-tecla iba por `api.renderer.keyInput.on("keypress")` porque `useKeyboard()` de @opentui/solid necesita el `RendererContext` y falla mudo desde un slot; los sprites usaban medios-bloques (`toHalfBlocks`/`scalePixels`) para píxeles cuadrados. **Todo eso se eliminó en v5.** Si algún día vuelve una animación, que sea **opt-in** y que se frene sola tras N segundos (no dejar `setInterval` vivo en sesiones parkeadas).
 
 ## Tests
 
 ```
 node --import ./test/register.mjs --test test/idle-dim.test.mjs
 ```
-Stubs de `@opentui/solid` y `solid-js` vía loader hook (`test/register.mjs` → `test/loader.mjs` → `test/stubs/`), sin node_modules. El stub de opentui solo exporta `createElement`/`spread` (por eso `useKeyboard` se accede como `otui.useKeyboard`, undefined en test). Cubre: dim al aparecer el flag, contenido idle en `sidebar_content`, fade en orden (03, 05, 07, original), restore, y el invariante **cero `api.route`**. `OPENCODE_IDLE_DIR` y `OPENCODE_IDLE_TTY` inyectables por env. Estado: **1 pass**.
+Stubs de `@opentui/solid` y `solid-js` vía loader hook (`test/register.mjs` → `test/loader.mjs` → `test/stubs/`), sin node_modules. Cubre: **dim instantáneo** al aparecer el flag (`themeCalls == ["beib-dim"]`, sin pasos de fade), título naranja + `💤` en el prompt mientras dim, **restore instantáneo** (`["beib-dim","system"]`), y el invariante **cero `api.route`**. `OPENCODE_IDLE_DIR` y `OPENCODE_IDLE_TTY` inyectables por env. Estado: **1 pass** (~170ms; en v4 tardaba ~3.5s por los fades).
 
-Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mirar la sesión, `~/.local/bin/opencode-iterm-state active` (restaura). `tail ~/.local/state/opencode-idle/debug.log` muestra `saver: picked <name>`, `accent=...`, y errores si los hay.
+Verificación manual: `~/.local/bin/opencode-iterm-state idle` (crea flag), mirar la sesión, `~/.local/bin/opencode-iterm-state active` (restaura). `tail ~/.local/state/opencode-idle/debug.log` muestra `tab: painted idle …`, `apply: dim on …`, `apply: restored to …`.
 
 ## Historia reciente (commits clave)
 
-- **(HEAD, este commit)** — **comandos `/tabs-color` y `/tabs-name`** (subcomandos `tabs-color`/`tabs-name` del bash) que coordinan toda la barra: color teal/gris por tab (any-active→teal), y nombres `proj1:proj2` por carpeta con alias file (`tab-aliases.conf`). Nombres aplicados por AppleScript (pega en sesiones con título locked, que ignoran OSC 1). Docs + install.sh + ejemplo de alias. Trampas 13/14 nuevas.
-- `e823465` — **color de tab por estado**, pintado por el plugin (`paintTab`): activa = teal `#529e99` (el accent del alien de idle), idle = gris `#2b2b2b`. El bash deja de tintar el bg del tab (sólo limpia badge). Docs (README, handoff, comandos `idle`/`active`) actualizadas.
-- `7f555ba` — docs: README reescrito para v4 (screensavers, fade-in, wake con tecla).
-- `9977b66` — alien = logo ACME rasterizado del SVG (aspect-correct vía `scalePixels`+`toHalfBlocks`), **fade-in al entrar** (`runFadeInSequence`), **fix despertar-con-tecla** (binding directo en `api.renderer.keyInput`, ya no `useKeyboard`), saca `ACME_GREEN` sin uso, agrega `.gitignore`, commitea `acme-alien-logo.png` (fuente del sprite) + `REPORTE-2026-06-12-incidente-idle.md`.
-- `f216a3d` — saca Pac-Man, alien medio-bloque (píxeles cuadrados), loading solo barra, un solo color del theme accent.
-- `6978234` — sistema de savers pluggables (random por /idle): alien chico, Pac-Man con fantasmas, barra LOADING 8-bit + header de identidad.
-- `a2e29a9` — screensaver DVD-bounce fullscreen vía slot `app` (sin rutas), dismiss con cualquier tecla.
-- `6ebdb0b` — **fix del incidente**: saca la ruta fullscreen que dejaba sin `/active` (trampa 7).
+- **(HEAD, este commit)** — **v5: se elimina el screensaver entero** (savers, sprites ACME, overlay `app`, fade in/out, animTick, despertar-con-tecla) por calor con muchas sesiones parkeadas. `/idle` queda como dim instantáneo por theme + tint de tab gris, cero CPU al estar parkeada. Test reescrito (dim/restore instantáneo + cero-route). README + handoff reescritos. (Parte del fix de calor; Track 1 = reorg MCP + reaper, en sistema; Track 3 = `docs/orchestrator-review.md`.)
+- `7a282be` — comandos `/tabs-color` y `/tabs-name` (color teal/gris por tab any-active→teal; nombres `proj1:proj2` con alias file). Nombres por AppleScript (pega en sesiones locked).
+- `e823465` — color de tab por estado, pintado por el plugin (`paintTab`): activa teal, idle gris. El bash deja de tintar el bg.
+- `7f555ba` — docs: README v4 (screensavers, fade-in, wake con tecla).
+- `9977b66` — alien = logo ACME del SVG (aspect-correct), fade-in al entrar, fix despertar-con-tecla, `.gitignore`, commitea `acme-alien-logo.png` + `REPORTE-2026-06-12-incidente-idle.md`.
+- `f216a3d` — saca Pac-Man, alien medio-bloque, loading solo barra, un solo color.
+- `6978234` — savers pluggables (random por /idle): alien, Pac-Man, barra LOADING + header.
+- `a2e29a9` — screensaver DVD-bounce fullscreen vía slot `app`, dismiss con cualquier tecla.
+- `6ebdb0b` — fix del incidente: saca la ruta fullscreen que dejaba sin `/active` (trampa 7).
 - `ccdb5db` — comando ⌘K Wake Up.
-- Cadena `7705f61`…`f5c0209` — fade de 4 pasos, cancelable, guard de duplicados, preservación de `saved`.
+- Cadena `7705f61`…`f5c0209` — fade de 4 pasos, cancelable.
 
-Specs/planes: `docs/superpowers/specs/2026-06-12-idle-fun-mode-design.md`, `docs/superpowers/plans/2026-06-12-idle-fun-mode-plan.md`, `.opencode/plans/1781290888739-silent-moon.md` (plan v4). Incidente: `REPORTE-2026-06-12-incidente-idle.md`.
+Specs/planes: `.opencode/plans/1781358825007-proud-knight.md` (plan v5/heat-fix), `.opencode/plans/1781290888739-silent-moon.md` (plan v4). Incidente: `REPORTE-2026-06-12-incidente-idle.md`.
 
-## Archivos (resuelto en el commit HEAD)
+## Archivos
 
-- `REPORTE-2026-06-12-incidente-idle.md` — **commiteado** (documenta la trampa 7).
-- `acme-alien-logo.png` — **commiteado**, fuente del sprite `ACME_PIXELS`.
-- `.playwright-mcp/` — **ignorado** vía `.gitignore`.
+- `acme-alien-logo.png` — **commiteado**, era la fuente del sprite `ACME_PIXELS`. **Ya no lo usa el plugin** (v5 sin sprite); se conserva como histórico.
+- `themes/beib-dim-03/05/07.json` — pasos intermedios del fade viejo. **Sin uso en v5**; se conservan por si vuelve un fade opt-in.
+- `.playwright-mcp/` — ignorado vía `.gitignore`.
 
 ## Próximos pasos / ideas
 
-- [x] ~~Verificación visual de Beib~~ — OK (alien ACME proporcionado, fade-in, despertar-con-tecla confirmados en vivo 2026-06-13).
-- [ ] Posibles savers nuevos: starfield/warp, matrix rain, acuario, snake. Mismo contrato + `toHalfBlocks` (+ `scalePixels` si querés agrandar).
-- [x] ~~Actualizar `README.md` a v4~~ — hecho (v4 + comandos de tabs documentados).
-- [ ] `tabs-name` por full-path: hoy el alias por basename puede colisionar si dos proyectos comparten basename; documentado que el match por path completo gana.
-- [ ] Que el plugin publique `<tty>.info` con el cwd, para que `tabs-name` no dependa de `lsof`.
-- [ ] Auto-idle: `api.event.on("session.status"/"session.idle")` para dimear tras N min sin actividad.
-- [ ] Opciones por `tui.json` (`["./plugin/idle-dim.js", { accent, savers, ... }]`): hoy el plugin ignora el segundo arg `options`.
+- [ ] Si vuelve animación, que sea **opt-in por `tui.json`** y **auto-freeze tras N segundos** (nunca dejar `setInterval` vivo en sesiones parkeadas).
+- [ ] Borrar de verdad `themes/beib-dim-03/05/07.json` + `acme-alien-logo.png` del repo e install.sh si se confirma que no vuelve el fade/sprite.
+- [ ] `tabs-name`: que el plugin publique `<tty>.info` con el cwd, para no depender de `lsof`.
+- [ ] Auto-idle: plugin de evento (`event` hook) escuchando `session.idle`/`session.status` para dimear tras N min sin actividad (OJO: el TUI plugin `tui(api)` es otra forma que el plugin de eventos estándar; verificar si `api` expone `api.event` o hace falta un plugin separado).
+- [ ] Indicador activo/idle centralizado: ver `docs/orchestrator-review.md`.
 - [ ] Multi-terminal: separar lo de iTerm2 (tab tint) detrás de `TERM_PROGRAM`.
-- [ ] Publicar como plugin npm (`exports: {"./tui": ...}`).
 
 ## Contexto
 
-iTerm2 Profile Default: bg `#022029`, fg/accent `#ff9a00` (de ahí el naranja). El dimming nativo de iTerm2 está deshabilitado a propósito. Beib: MacBook Pro M5 Pro, OpenCode 1.17.4.
+iTerm2 Profile Default: bg `#022029`, fg/accent `#ff9a00` (de ahí el naranja). El dimming nativo de iTerm2 está deshabilitado a propósito. Beib: MacBook Pro M5 Pro (Mac17,9, 18-core, 64GB), OpenCode 1.17.8.

@@ -4,7 +4,11 @@
 // The hard requirement encoded here: the plugin must NEVER touch api.route.
 // OpenCode plugin routes render without the prompt/editor, so navigating to a
 // fullscreen idle route leaves the user unable to type /active (the session
-// looks dead). Idle fun content must live in sidebar slots only.
+// looks dead). The dim indicator must live in sidebar/prompt slots only.
+//
+// The plugin is the "cheap" version: entering/leaving idle is a single instant
+// theme switch (no fade animation, no screensaver, no overlay), so a parked
+// session costs ~0% CPU.
 import test from "node:test"
 import assert from "node:assert/strict"
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
@@ -44,6 +48,9 @@ function makeApi() {
         Object.assign(slotDefs, definition.slots)
       },
     },
+    command: {
+      register() {},
+    },
     route: {
       register(...args) {
         routeCalls.push(["register", args])
@@ -76,61 +83,39 @@ function childrenOf(node) {
   return Array.isArray(children) ? children : [children]
 }
 
-test("idle-dim lifecycle: dim, sidebar content, fade restore, no routes", async () => {
+test("idle-dim lifecycle: instant dim, prompt/title indicators, restore, no routes", async () => {
   const plugin = (await import("../plugin/idle-dim.js")).default
   const api = makeApi()
   await plugin.tui(api)
 
   // Slots registered, routes untouched.
   assert.ok(api.slotDefs.sidebar_title, "sidebar_title slot registered")
-  assert.ok(api.slotDefs.sidebar_content, "sidebar_content slot registered")
   assert.ok(api.slotDefs.session_prompt_right, "session_prompt_right slot registered")
   assert.deepEqual(api.routeCalls, [], "plugin must never touch api.route")
 
-  // Active state: sidebar content empty, prompt indicator empty.
-  const sidebarNode = api.slotDefs.sidebar_content(slotContext, {})
-  assert.ok(sidebarNode, "sidebar_content always returns a node (append slot)")
-  assert.equal(childrenOf(sidebarNode).length, 0, "no idle content while active")
+  // Active state: prompt indicator empty, title in the theme color.
   const promptNode = api.slotDefs.session_prompt_right(slotContext, {})
   assert.equal(childrenOf(promptNode).join(""), "", "no prompt indicator while active")
-
-  // Flag appears: theme dims within the 1.5s poll window.
-  writeFileSync(FLAG_FILE, "")
-  await waitFor(() => api.themeCalls.includes("beib-dim"), 5000, "dim theme set after flag creation")
-
-  // Entering idle fades IN (bright -> dark) before reaching the dim theme.
-  assert.deepEqual(
-    api.themeCalls.slice(0, 4),
-    ["beib-dim-07", "beib-dim-05", "beib-dim-03", "beib-dim"],
-    "enter fade steps through intermediate themes in order",
-  )
-
-  // Idle state: sidebar shows rotating content, prompt shows indicator.
-  const idleChildren = childrenOf(api.slotDefs.sidebar_content(slotContext, {}))
-  assert.ok(idleChildren.length > 0, "sidebar shows idle content while dimmed")
-  assert.equal(childrenOf(promptNode).join(""), "💤", "prompt indicator visible while dimmed")
-
-  // Title slot stays rendered and turns bright while dimmed.
   const titleNode = api.slotDefs.sidebar_title(slotContext, { title: "proj" })
   const titleText = childrenOf(titleNode)[0]
+  assert.equal(titleText.props.fg, "#ffffff", "title in theme color while active")
+
+  // Flag appears: theme dims with a single instant switch (no fade steps).
+  writeFileSync(FLAG_FILE, "")
+  await waitFor(() => api.themeCalls.includes("beib-dim"), 6000, "dim theme set after flag creation")
+  assert.deepEqual(api.themeCalls, ["beib-dim"], "enter idle is one instant theme switch (no fade)")
+
+  // Idle state: prompt shows the 💤 indicator, title turns bright orange.
+  assert.equal(childrenOf(promptNode).join(""), "💤", "prompt indicator visible while dimmed")
   assert.equal(titleText.props.fg, "#ff9a00", "title is bright orange while dimmed")
 
-  // Flag removed: wake fade steps through intermediate themes, then restores.
+  // Flag removed: theme restored to the saved theme with a single instant switch.
   rmSync(FLAG_FILE)
-  await waitFor(
-    () => api.themeCalls.at(-1) === "system",
-    6000,
-    "theme restored to saved theme after flag removal",
-  )
-  const fadeTail = api.themeCalls.slice(-4)
-  assert.deepEqual(
-    fadeTail,
-    ["beib-dim-03", "beib-dim-05", "beib-dim-07", "system"],
-    "wake fade steps through intermediate themes in order",
-  )
+  await waitFor(() => api.themeCalls.at(-1) === "system", 6000, "theme restored after flag removal")
+  assert.deepEqual(api.themeCalls, ["beib-dim", "system"], "restore is one instant switch back (no fade)")
 
-  // Back to active: idle content gone, title back to theme color.
-  assert.equal(childrenOf(api.slotDefs.sidebar_content(slotContext, {})).length, 0, "idle content cleared")
+  // Back to active: prompt indicator gone, title back to the theme color.
+  assert.equal(childrenOf(promptNode).join(""), "", "prompt indicator cleared")
   assert.equal(titleText.props.fg, "#ffffff", "title back to theme color")
 
   // The invariant, end to end: not a single route call.
